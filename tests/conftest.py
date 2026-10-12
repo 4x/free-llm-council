@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import threading
+from decimal import Decimal
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any
 from urllib.parse import parse_qs, urlsplit
@@ -12,7 +13,7 @@ import pytest
 def model(model_id: str, price: str = "0", context: int = 32000) -> dict[str, Any]:
     return {
         "id": model_id,
-        "pricing": {"prompt": price, "completion": price, "request": "0"},
+        "pricing": {"prompt": price, "completion": price, "output": price, "request": "0"},
         "architecture": {"input_modalities": ["text"], "output_modalities": ["text"]},
         "context_length": context,
     }
@@ -52,6 +53,21 @@ class MockRouter:
                 params = parse_qs(urlsplit(self.path).query)
                 state.gets.append(params)
                 catalog = state.ranked if "sort" in params else state.catalog
+                # Honor the catalog price caps so free-only queries really hide paid models.
+                if "max_price" in params:
+                    cap = Decimal(params["max_price"][0])
+                    catalog = [
+                        entry
+                        for entry in catalog
+                        if Decimal(str(entry["pricing"]["prompt"])) <= cap
+                    ]
+                if "max_output_price" in params:
+                    cap = Decimal(params["max_output_price"][0])
+                    catalog = [
+                        entry
+                        for entry in catalog
+                        if Decimal(str(entry["pricing"]["completion"])) <= cap
+                    ]
                 offset = int(params.get("offset", ["0"])[0])
                 page = catalog[offset : offset + state.page_size]
                 more = offset + len(page) < len(catalog)

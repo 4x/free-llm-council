@@ -237,7 +237,8 @@ def test_catalog_pagination(config, router):
     router.page_size = 1
     result = query_result("Question", settings=config, no_save=True)
     assert len(result.answers) == 2
-    assert [params["offset"] for params in router.gets] == [["0"], ["1"], ["2"], ["3"]]
+    # The free-price cap hides the paid entry server-side, so pagination walks 3 pages.
+    assert [params["offset"] for params in router.gets] == [["0"], ["1"], ["2"]]
 
 
 def test_no_free_models(config, router):
@@ -249,8 +250,16 @@ def test_no_free_models(config, router):
 
 def test_free_detection_is_conservative():
     valid = model("free-without-suffix")
+    output_free = model("output-free")
+    output_free["pricing"]["completion"] = "0"
+    output_free["pricing"]["output"] = "0"
     paid_output = model("paid-output:free")
     paid_output["pricing"]["completion"] = "0.01"
+    output_price = model("output-price")
+    output_price["pricing"]["output"] = "0.01"
+    completion_price = model("completion-price")
+    completion_price["pricing"]["completion"] = "0.01"
+
     request_fee = model("request-fee")
     request_fee["pricing"]["request"] = "0.01"
     missing = model("missing")
@@ -264,8 +273,11 @@ def test_free_detection_is_conservative():
     image["architecture"]["output_modalities"] = ["image"]
     catalog = [
         valid,
+        output_free,
         valid,
         paid_output,
+        output_price,
+        completion_price,
         request_fee,
         missing,
         bad,
@@ -274,7 +286,10 @@ def test_free_detection_is_conservative():
         image,
         model("openrouter/free"),
     ]
-    assert [entry["id"] for entry in council_models(catalog)] == ["free-without-suffix"]
+    assert [entry["id"] for entry in council_models(catalog)] == [
+        "free-without-suffix",
+        "output-free",
+    ]
 
 
 def test_env_precedence_and_case_insensitivity(tmp_path, monkeypatch):

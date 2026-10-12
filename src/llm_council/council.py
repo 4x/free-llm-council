@@ -49,12 +49,15 @@ def _short_model_name(model_id: str) -> str:
 def _read_prompt(
     prompt: str | Path | None, file: str | Path | None, literal_prompt: bool = False
 ) -> tuple[str, str | None]:
-    if (prompt is None) == (file is None):
-        raise ConfigurationError("Supply exactly one of prompt or file.")
+    if prompt is None and file is None:
+        raise ConfigurationError("Supply a prompt, a file, or both.")
     source: Path | None = Path(file) if file is not None else None
-    if isinstance(prompt, Path):
+    source_prompt: str | None = None
+    if file is not None:
+        source_prompt = prompt if isinstance(prompt, str) else None
+    elif isinstance(prompt, Path):
         source = prompt
-    elif isinstance(prompt, str) and source is None and not literal_prompt:
+    elif isinstance(prompt, str) and not literal_prompt:
         # Existing files work in query(prompt='path'); explicit file avoids path ambiguity.
         try:
             candidate = Path(prompt)
@@ -68,6 +71,8 @@ def _read_prompt(
         except (OSError, UnicodeError) as exc:
             raise ConfigurationError(f"Cannot read UTF-8 prompt file {source}: {exc}") from exc
         source_path = str(source.resolve())
+        if source_prompt is not None:
+            text = f"{text}\n\n{source_prompt}"
     else:
         text = str(prompt)
         source_path = None
@@ -98,6 +103,7 @@ def query_result(
     file input use file=; literal_prompt=True disables string-path detection.
     Per-call settings override .env and process environment.
     no_save disables ALL persistence, including settings from .env.
+    If both prompt and file are provided, file text precedes the literal prompt.
     """
     text, source_path = _read_prompt(prompt, file, literal_prompt)
     config = settings if settings is not None else Settings.from_env(env_file)

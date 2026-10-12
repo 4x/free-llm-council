@@ -43,6 +43,25 @@ def select_judge(
                 "or use 'free-router' for free routing."
             )
         return "openrouter/auto", False
+    if normalized not in STRATEGIES:
+        matches = [model for model in catalog if model.get("id") == strategy]
+        if not matches:
+            # Free-priced catalog requests hide paid models; look there before
+            # reporting the judge as unknown.
+            matches = [
+                model
+                for model in client.list_models(free_only=False)
+                if model.get("id") == strategy
+            ]
+        if not matches or model_exclusion_reason(matches[0], settings.excluded_models) is not None:
+            raise ConfigurationError(f"Unknown judge strategy or text model: {strategy!r}.")
+        free = is_free_model(matches[0])
+        if settings.judge_scope == "free" and not free:
+            raise ConfigurationError("A paid judge requires judge_scope='all'.")
+        return strategy, free
+    if settings.judge_scope == "all":
+        # Scope 'all' selects paid judges too, so query without the free-price filters.
+        catalog = client.list_models(free_only=False)
     eligible = (
         council_models(catalog, settings.excluded_models)
         if settings.judge_scope == "free"
@@ -54,14 +73,6 @@ def select_judge(
         ]
     )
     ids = sorted({model["id"] for model in eligible})
-    if normalized not in STRATEGIES:
-        matches = [model for model in catalog if model.get("id") == strategy]
-        if not matches or model_exclusion_reason(matches[0], settings.excluded_models) is not None:
-            raise ConfigurationError(f"Unknown judge strategy or text model: {strategy!r}.")
-        free = is_free_model(matches[0])
-        if settings.judge_scope == "free" and not free:
-            raise ConfigurationError("A paid judge requires judge_scope='all'.")
-        return strategy, free
     if not ids:
         raise ConfigurationError("No eligible judge models were discovered.")
     if normalized == "random":
@@ -78,7 +89,11 @@ def select_judge(
         )["id"]
     else:
         # Exclude unranked models; never silently substitute context length for intelligence.
-        ranked = client.list_models(sort="intelligence-high-to-low", min_intelligence_index=0)
+        ranked = client.list_models(
+            sort="intelligence-high-to-low",
+            min_intelligence_index=0,
+            free_only=settings.judge_scope == "free",
+        )
         selected = next((model["id"] for model in ranked if model.get("id") in ids), "")
         if not selected:
             raise ConfigurationError(

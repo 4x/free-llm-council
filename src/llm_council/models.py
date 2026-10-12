@@ -62,7 +62,10 @@ def is_free_model(model: dict[str, Any]) -> bool:
     if pricing.get("overrides"):
         return False
     try:
-        return all(Decimal(str(pricing.get(key, "0"))) == 0 for key in TEXT_CHARGES)
+        charges = [pricing.get(key, "0") for key in TEXT_CHARGES]
+        if "output" in pricing:
+            charges.append(pricing["output"])
+        return all(Decimal(str(charge)) == 0 for charge in charges)
     except (InvalidOperation, ValueError):
         return False
 

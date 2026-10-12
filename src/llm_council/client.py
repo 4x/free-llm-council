@@ -133,21 +133,23 @@ class OpenRouterClient:
             raise OpenRouterError(f"OpenRouter error {status}: {message}", status)
         raise AssertionError("Retry loop must return or raise")
 
-    def list_models(self, **filters: str | int) -> list[dict[str, Any]]:
+    def list_models(self, *, free_only: bool = True, **filters: str | int) -> list[dict[str, Any]]:
         models: list[dict[str, Any]] = []
         offset = 0
         while True:
-            payload = self._request(
-                "GET",
-                "models",
-                params={
-                    "input_modalities": "text",
-                    "output_modalities": "text",
-                    **filters,
-                    "limit": 1000,
-                    "offset": offset,
-                },
-            )
+            params: dict[str, str | int] = {
+                **filters,
+                "input_modalities": "text",
+                "output_modalities": "text",
+                "max_price": 0,
+                "max_output_price": 0,
+                "limit": 1000,
+                "offset": offset,
+            }
+            if not free_only:
+                params.pop("max_price")
+                params.pop("max_output_price")
+            payload = self._request("GET", "models", params=params)
             page = payload.get("data")
             if not isinstance(page, list) or any(not isinstance(item, dict) for item in page):
                 raise OpenRouterError("OpenRouter catalog is missing its model list.")

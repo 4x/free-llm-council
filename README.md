@@ -84,9 +84,11 @@ uv run llm-council -q "Explain entropy" --judge auto --judge-scope all
 python -m llm_council --help
 ```
 
-Supply exactly one of `--question` / `--file`. The CLI **renders the synthesis as Markdown
-on stdout by default**, regardless of whether saving is enabled; headings, lists, emphasis,
-and code blocks are formatted for terminal reading. Progress logs and errors/warnings go
+Supply `--question`, `--file`, or both. When both are supplied, the UTF-8 file is read
+as context and the literal question is appended after it, separated by a blank line. The CLI
+**renders the synthesis as Markdown on stdout by default**, regardless of whether saving
+is enabled; headings, lists, emphasis, and code blocks are formatted for terminal reading.
+Progress logs and errors/warnings go
 to stderr. Errors exit with status 1; invalid CLI usage exits with status 2. `--no-save`
 disables **all persistence**, even if other save flags or `.env` request it.
 `SAVE_PROMPT=NONE` only disables prompt content, not response saving. Each normal CLI run
@@ -227,14 +229,20 @@ any model that already errored). This avoids repeating a known-failing endpoint.
 ## Discovery, costs, privacy, and limits
 
 - Every run fetches the live, paginated `/models` catalog with `input_modalities=text`
-  and `output_modalities=text`. Local validation also requires explicit text support in
-  **both directions**, using modality arrays or the legacy `architecture.modality`
+  and `output_modalities=text`. The free-model catalog request also sets `max_price=0`
+  and `max_output_price=0`. Judge discovery with `judge_scope=all` repeats that catalog
+  query without the price caps, and an explicit judge ID the free query hides is looked
+  up unfiltered too, so paid judges stay selectable. Local validation requires zero prompt (`pricing.prompt`)
+  and completion/output (`pricing.completion`) prices, plus zero optional
+  request/reasoning/cache charges. Local validation also requires explicit text support
+  in **both directions**, using modality arrays or the legacy `architecture.modality`
   summary when arrays are absent. Missing/null/malformed capabilities are skipped;
   multimodal models that also support text remain eligible. "Endpoints" here means
   **distinct catalog model IDs**, not every provider backing the same model. OpenRouter
   chooses the provider for each model request.
-- Free detection requires explicitly zero prompt/completion prices, checks request,
-  reasoning, and cache charges if present, and rejects conditional pricing overrides.
+- Free detection requires explicitly zero prompt and completion/output prices, checks
+  optional request, reasoning, and cache charges if present, and rejects conditional pricing
+  overrides.
   Non-text models and routers are not council members. No `:free` suffix is fabricated.
 - `thinkingmachines/inkling-small:free` is excluded from council members and judges
   because it returns a harness-only 403 for this plain-chat workflow. OpenRouter's
@@ -250,7 +258,7 @@ any model that already errored). This avoids repeating a known-failing endpoint.
   models. OpenRouter's `auto`/`free-router` judges choose their underlying model
   server-side, so local exclusions cannot constrain those router decisions; use a
   catalog-selected or explicit judge if you need that guarantee.
-- Free calls additionally constrain provider prompt/completion pricing to zero to
+- Free calls additionally constrain provider prompt/output pricing to zero to
   protect against catalog changes. A free catalog entry is not proof it will be
   available to your account; quotas, outages, and context limits can still fail calls.
 - All member requests are attempted, with bounded concurrency and global request-start

@@ -104,7 +104,8 @@ def test_discovery_pagination_uses_raw_entries_even_when_whole_pages_are_filtere
     router.catalog = [model("thinkingmachines/inkling-small:free"), missing] + router.catalog
     result = query_result("Question", settings=config, no_save=True)
     assert len(result.answers) == 2
-    assert [params["offset"] for params in router.gets] == [[str(index)] for index in range(6)]
+    # Five pages: the free-price cap hides the paid fixture entry server-side.
+    assert [params["offset"] for params in router.gets] == [[str(index)] for index in range(5)]
 
 
 @pytest.mark.parametrize("judge", ["thinkingmachines/inkling-small:free", "test/excluded:free"])

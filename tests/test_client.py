@@ -232,6 +232,20 @@ def test_request_start_pacing(client, monkeypatch):
     assert waits == [3.1, 3.1]
 
 
+def test_catalog_requests_are_limited_to_free_prompt_and_output_pricing(client):
+    requests = []
+
+    def handler(request):
+        requests.append(request)
+        return httpx.Response(200, json={"data": [], "total_count": 0})
+
+    transport(client, handler)
+    client.list_models()
+    assert len(requests) == 1
+    assert requests[0].url.params.get("max_price") == "0"
+    assert requests[0].url.params.get("max_output_price") == "0"
+
+
 def test_negative_max_tokens_uses_provider_default(client):
     client.settings = client.settings.with_overrides(max_tokens=-1)
     requests = []

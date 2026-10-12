@@ -25,10 +25,10 @@ def parser() -> argparse.ArgumentParser:
         description="Ask every currently free OpenRouter text model, then synthesize with a judge.",
         epilog="Judge strategies: " + ", ".join(STRATEGIES) + "; or an explicit model ID.",
     )
-    inputs = result.add_mutually_exclusive_group(required=True)
-    inputs.add_argument("--question", "-q", dest="prompt", help="Literal prompt text")
-    inputs.add_argument("--file", "-f", help="UTF-8 prompt file")
-    inputs.add_argument(
+    result.add_argument("--question", "-q", dest="prompt", help="Literal question text")
+    result.add_argument("--file", "-f", help="UTF-8 context file; combines before --question")
+    result.set_defaults(followup_prompt=None)
+    result.add_argument(
         "--followup", dest="followup_prompt", help="Ask a follow-up using the latest synthesis"
     )
     result.add_argument("--copy", action="store_true", help="Copy the synthesis to the clipboard")
@@ -123,17 +123,23 @@ def _copy_to_clipboard(synthesis: str) -> None:
 
 
 def main(argv: Sequence[str] | None = None) -> int:
-    args = parser().parse_args(argv)
+    arg_parser = parser()
+    args = arg_parser.parse_args(argv)
+    followup_prompt = args.followup_prompt
+    if followup_prompt is not None and (args.file is not None or args.prompt is not None):
+        arg_parser.error("--followup cannot be combined with --question or --file")
+    if followup_prompt is None and args.file is None and args.prompt is None:
+        arg_parser.error("provide --question, --file, or both")
     try:
         options = vars(args)
-        followup_prompt = options.pop("followup_prompt")
+        options.pop("followup_prompt")
         should_copy = options.pop("copy")
         previous_synthesis = _load_latest_synthesis() if followup_prompt is not None else None
         if followup_prompt is not None:
             options["prompt"] = followup_prompt
         answer = query(
             **options,
-            literal_prompt=args.file is None,
+            literal_prompt=args.file is None and followup_prompt is None,
             previous_synthesis=previous_synthesis,
         )
     except CouncilError as exc:

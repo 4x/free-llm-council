@@ -1,3 +1,4 @@
+import json
 import os
 import subprocess
 import sys
@@ -220,6 +221,21 @@ def test_cli_excludes_harness_nontext_and_configured_models(cli_env, router, tmp
     assert len(router.calls) == 2
 
 
+def test_cli_file_and_question_are_combined_file_first(cli_env, router, tmp_path):
+    context_file = tmp_path / "context.md"
+    context_file.write_text("Prior file context", encoding="utf-8")
+    result = run_cli(
+        ["--file", str(context_file), "--question", "Current question", "--no-save"],
+        tmp_path,
+        cli_env,
+    )
+    assert result.returncode == 0, result.stderr
+    combined = "Prior file context\n\nCurrent question"
+    assert router.calls[0]["messages"][0]["content"] == combined
+    judge_call = next(call for call in router.calls if call["messages"][0]["role"] == "system")
+    assert json.loads(judge_call["messages"][1]["content"])["original_question"] == combined
+
+
 def test_cli_question_is_literal_even_if_file_exists(cli_env, router, tmp_path):
     (tmp_path / "prompt.md").write_text("File contents", encoding="utf-8")
     result = run_cli(["--question", "prompt.md", "--no-save"], tmp_path, cli_env)
@@ -259,10 +275,21 @@ def test_cli_env_file(cli_env, tmp_path):
 
 
 @pytest.mark.parametrize(
-    "args", [[], ["--question", "x", "--file", "y"], ["-q", "x", "--save-synthesis", "invalid"]]
+    "args",
+    [
+        [],
+        ["--question", "x", "--followup", "y"],
+        ["-q", "x", "--save-synthesis", "invalid"],
+    ],
 )
 def test_cli_invalid_usage(cli_env, router, tmp_path, args):
     result = run_cli(args, tmp_path, cli_env)
+    assert result.returncode == 2
+    assert not router.calls
+
+
+def test_cli_missing_question_and_file_is_usage_error(cli_env, router, tmp_path):
+    result = run_cli([], tmp_path, cli_env)
     assert result.returncode == 2
     assert not router.calls
 

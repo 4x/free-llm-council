@@ -71,6 +71,32 @@ def test_paid_judge_opt_in(config, router):
     assert len(result.answers) == 2
 
 
+def test_paid_judge_catalog_lookup_drops_free_price_filters(config, router):
+    # The free-priced discovery query hides test/paid, so an unfiltered lookup must
+    # run before the judge can be reported as paid rather than unknown.
+    with pytest.raises(ConfigurationError, match="requires judge_scope"):
+        query_result("Question", settings=config, judge="test/paid", no_save=True)
+    assert not router.calls
+    assert router.gets[0]["max_price"] == ["0"]
+    assert router.gets[0]["max_output_price"] == ["0"]
+    assert "max_price" not in router.gets[1]
+    assert "max_output_price" not in router.gets[1]
+
+
+def test_all_scope_judge_catalog_drops_free_price_filters(config, router, monkeypatch):
+    monkeypatch.setattr(judges.random, "choice", lambda values: values[-1])
+    result = query_result(
+        "Question", settings=config, judge="random", judge_scope="all", no_save=True
+    )
+    # Eligible ids are sorted, so the last one is the paid fixture model.
+    assert result.judge_requested == "test/paid"
+    # Member discovery keeps the free-price caps; the scope='all' judge query does not.
+    assert router.gets[0]["max_price"] == ["0"]
+    assert router.gets[0]["max_output_price"] == ["0"]
+    assert "max_price" not in router.gets[1]
+    assert "max_output_price" not in router.gets[1]
+
+
 def test_intelligence_ranking_can_select_paid_judge(config):
     result = query_result(
         "Question", settings=config, judge="most-intelligent", judge_scope="all", no_save=True
