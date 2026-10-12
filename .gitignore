@@ -15,6 +15,7 @@ wheels/
 !.env.example
 council.duckdb*
 council-output/
+.llm-council/
 
 # Tool caches
 .pytest_cache/

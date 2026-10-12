@@ -7,6 +7,9 @@ import duckdb
 import pytest
 from conftest import model
 
+from llm_council import cli
+from llm_council.errors import ConfigurationError
+
 
 @pytest.fixture
 def cli_env(router):
@@ -66,6 +69,65 @@ def test_installed_cli_question_markdown(cli_env, router, tmp_path):
     assert folders[0].name.rsplit("-", 1)[-1].startswith("20")
     with duckdb.connect(str(tmp_path / "council.duckdb")) as db:
         assert db.execute("SELECT prompt FROM questions").fetchone() == ("Explain Riemann",)
+
+
+def test_cli_followup_uses_cached_synthesis_in_messages(cli_env, router, tmp_path):
+    first = run_cli(["-q", "Original question"], tmp_path, cli_env)
+    assert first.returncode == 0, first.stderr
+    cache = tmp_path / ".llm-council" / "latest-synthesis.md"
+    previous = cache.read_text(encoding="utf-8")
+
+    router.calls.clear()
+    followup = run_cli(
+        ["--followup", "Clarify the previous answer", "--no-save"], tmp_path, cli_env
+    )
+    assert followup.returncode == 0, followup.stderr
+    assert router.calls[0]["messages"] == [
+        {"role": "assistant", "content": previous},
+        {"role": "user", "content": "Clarify the previous answer"},
+    ]
+    judge_call = next(call for call in router.calls if call["messages"][0]["role"] == "system")
+    assert judge_call["messages"][1] == {"role": "assistant", "content": previous}
+    assert judge_call["messages"][2]["role"] == "user"
+    assert cache.read_text(encoding="utf-8") == previous
+
+
+def test_followup_without_cache_fails_before_model_requests(cli_env, router, tmp_path):
+    result = run_cli(["--followup", "Ask for details"], tmp_path, cli_env)
+    assert result.returncode == 1
+    assert "No previous synthesis is cached" in result.stderr
+    assert router.calls == []
+
+
+def test_copy_option_passes_exact_synthesis_to_clipboard(monkeypatch):
+    copied: list[str] = []
+    monkeypatch.setattr(cli, "query", lambda **_: "Exact **Markdown** synthesis")
+    monkeypatch.setattr(cli, "_copy_to_clipboard", copied.append)
+    monkeypatch.setattr(cli, "_cache_latest_synthesis", lambda _: None)
+
+    assert cli.main(["-q", "Question", "--copy", "--no-save"]) == 0
+    assert copied == ["Exact **Markdown** synthesis"]
+
+
+def test_copy_to_clipboard_uses_windows_clipboard(monkeypatch):
+    invocations = []
+    monkeypatch.setattr(cli.sys, "platform", "win32")
+    monkeypatch.setattr(cli.shutil, "which", lambda executable: "clip.exe")
+    monkeypatch.setattr(
+        cli.subprocess, "run", lambda command, **kwargs: invocations.append((command, kwargs))
+    )
+
+    cli._copy_to_clipboard("Exact synthesis")
+    assert invocations == [
+        (("clip",), {"input": "Exact synthesis", "text": True, "check": True, "timeout": 15})
+    ]
+
+
+def test_copy_without_clipboard_utility_is_actionable(monkeypatch):
+    monkeypatch.setattr(cli.sys, "platform", "linux")
+    monkeypatch.setattr(cli.shutil, "which", lambda _: None)
+    with pytest.raises(ConfigurationError, match="No clipboard utility found"):
+        cli._copy_to_clipboard("Synthesis")
 
 
 def test_cli_renders_synthesis_as_markdown(cli_env, router, tmp_path):

@@ -89,6 +89,7 @@ def query_result(
     literal_prompt: bool = False,
     env_file: str | Path | None = None,
     settings: Settings | None = None,
+    previous_synthesis: str | None = None,
     **overrides: Any,
 ) -> CouncilResult:
     """Run a council and return text, model identities, errors, usage, and storage location.
@@ -133,9 +134,11 @@ def query_result(
                 model_id = model["id"]
                 logger.debug("Querying council member %s", model_id)
                 try:
-                    answer = client.complete(
-                        model_id, [{"role": "user", "content": text}], free_only=True
-                    )
+                    messages = []
+                    if previous_synthesis is not None:
+                        messages.append({"role": "assistant", "content": previous_synthesis})
+                    messages.append({"role": "user", "content": text})
+                    answer = client.complete(model_id, messages, free_only=True)
                     logger.info("Received answer from %s", answer.model)
                     return answer
                 except OpenRouterError as exc:
@@ -191,14 +194,15 @@ def query_result(
             for candidate, candidate_free in judge_candidates:
                 logger.info("Synthesizing %d valid answers with %s", len(successful), candidate)
                 try:
-                    synthesis = client.complete(
-                        candidate,
+                    messages = [{"role": "system", "content": JUDGE_SYSTEM}]
+                    if previous_synthesis is not None:
+                        messages.append({"role": "assistant", "content": previous_synthesis})
+                    messages.extend(
                         [
-                            {"role": "system", "content": JUDGE_SYSTEM},
                             {"role": "user", "content": judge_input},
-                        ],
-                        free_only=candidate_free,
+                        ]
                     )
+                    synthesis = client.complete(candidate, messages, free_only=candidate_free)
                     used_judge = candidate
                     break
                 except OpenRouterError as exc:

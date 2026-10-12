@@ -79,6 +79,7 @@ uv run llm-council --file path/to/prompt.md --save-synthesis duckdb
 uv run llm-council -q "Compare Bayesian and frequentist inference" --judge largest-context \
   --save-prompt both --save-initial-answers both --save-synthesis both
 uv run llm-council -q "Explain entropy" --no-save
+uv run llm-council --followup "provide more details about that last security caveat" --copy
 uv run llm-council -q "Explain entropy" --judge auto --judge-scope all
 python -m llm_council --help
 ```
@@ -88,7 +89,13 @@ on stdout by default**, regardless of whether saving is enabled; headings, lists
 and code blocks are formatted for terminal reading. Progress logs and errors/warnings go
 to stderr. Errors exit with status 1; invalid CLI usage exits with status 2. `--no-save`
 disables **all persistence**, even if other save flags or `.env` request it.
-`SAVE_PROMPT=NONE` only disables prompt content, not response saving.
+`SAVE_PROMPT=NONE` only disables prompt content, not response saving. Each normal CLI run
+caches its latest synthesis in `.llm-council/latest-synthesis.md` for `--followup`; this is
+separate from DuckDB/Markdown saving. `--no-save` suppresses updating that cache. A follow-up
+requires an existing cached synthesis, adds it as prior assistant context before the new
+follow-up prompt, and then starts a normal council run. `--copy` copies the exact synthesis
+to the system clipboard (using `clip` on Windows, `pbcopy` on macOS, or `wl-copy`, `xclip`,
+or `xsel` on Linux); it reports an error if no supported utility is available.
 
 ## Configuration
 
