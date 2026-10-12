@@ -1,0 +1,43 @@
+[project]
+name = "llm-council"
+version = "0.1.0"
+description = "Query every free OpenRouter model and synthesize their answers with an LLM judge."
+readme = "README.md"
+authors = [
+    { name = "4x", email = "ShaharShlomi@gmail.com" }
+]
+requires-python = ">=3.11"
+dependencies = [
+    "duckdb>=1.1,<2",
+    "httpx>=0.27,<1",
+    "python-dotenv>=1,<2",
+]
+
+[dependency-groups]
+dev = [
+    "pytest>=8,<10",
+    "mypy>=1.11,<2",
+    "ruff>=0.9,<1",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
+[tool.mypy]
+python_version = "3.11"
+strict = true
+files = ["src/llm_council"]
+
+[tool.ruff]
+target-version = "py311"
+line-length = 100
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B"]
+
+[project.scripts]
+llm-council = "llm_council.cli:main"
+
+[build-system]
+requires = ["uv_build>=0.13.0,<0.14.0"]
+build-backend = "uv_build"
