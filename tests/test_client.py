@@ -86,6 +86,135 @@ def test_retry_after_http_date(client):
     assert 18 <= client._retry_delay(response, 0) <= 20
 
 
+def test_retry_after_non_finite_is_ignored(client):
+    response = httpx.Response(429, headers={"Retry-After": "Infinity"})
+    assert client._retry_after(response) is None
+
+
+def test_retries_503_honors_retry_after(client, monkeypatch):
+    calls = []
+    waits = []
+    clock = [0.0]
+    monkeypatch.setattr("llm_council.client.time.monotonic", lambda: clock[0])
+
+    def sleep(delay):
+        waits.append(delay)
+        clock[0] += delay
+
+    monkeypatch.setattr("llm_council.client.time.sleep", sleep)
+
+    def handler(request):
+        calls.append(request)
+        if len(calls) == 1:
+            return httpx.Response(
+                503,
+                json={"error": {"code": 503, "message": "unavailable"}},
+                headers={"Retry-After": "4"},
+            )
+        return httpx.Response(200, json=good())
+
+    transport(client, handler)
+    answer = client.complete("requested/model", [{"role": "user", "content": "Question"}])
+    assert answer.model == "actual/model"
+    assert len(calls) == 2 and waits == [4.0]
+
+
+def test_retries_in_flight_budget_402_honors_retry_after(client, monkeypatch):
+    calls = []
+    waits = []
+    clock = [0.0]
+    monkeypatch.setattr("llm_council.client.time.monotonic", lambda: clock[0])
+
+    def sleep(delay):
+        waits.append(delay)
+        clock[0] += delay
+
+    monkeypatch.setattr("llm_council.client.time.sleep", sleep)
+
+    def handler(request):
+        calls.append(request)
+        if len(calls) == 1:
+            return httpx.Response(
+                402,
+                json={
+                    "error": {
+                        "code": 402,
+                        "message": "in-flight budget reached",
+                        "metadata": {"limit_source": "openrouter_in_flight_budget"},
+                    }
+                },
+                headers={"Retry-After": "7"},
+            )
+        return httpx.Response(200, json=good())
+
+    transport(client, handler)
+    answer = client.complete("requested/model", [{"role": "user", "content": "Question"}])
+    assert answer.model == "actual/model"
+    assert len(calls) == 2 and waits == [7.0]
+
+
+def test_in_flight_budget_402_without_retry_after_is_not_retried(client):
+    calls = []
+
+    def handler(request):
+        calls.append(request)
+        return httpx.Response(
+            402,
+            json={
+                "error": {
+                    "code": 402,
+                    "message": "in-flight budget reached",
+                    "metadata": {"limit_source": "openrouter_in_flight_budget"},
+                }
+            },
+        )
+
+    transport(client, handler)
+    with pytest.raises(OpenRouterError, match="in-flight budget reached"):
+        client.complete("model", [])
+    assert len(calls) == 1
+
+
+def test_other_402_with_retry_after_is_not_retried(client):
+    calls = []
+
+    def handler(request):
+        calls.append(request)
+        return httpx.Response(
+            402,
+            json={"error": {"message": "insufficient credits"}},
+            headers={"Retry-After": "1"},
+        )
+
+    transport(client, handler)
+    with pytest.raises(OpenRouterError, match="insufficient credits"):
+        client.complete("model", [])
+    assert len(calls) == 1
+
+
+def test_retry_after_over_cap_on_402_fails_without_early_retry(client):
+    calls = []
+
+    def handler(request):
+        calls.append(request)
+        return httpx.Response(
+            402,
+            json={
+                "error": {
+                    "code": 402,
+                    "message": "in-flight budget reached",
+                    "metadata": {"limit_source": "openrouter_in_flight_budget"},
+                }
+            },
+            headers={"Retry-After": "3600"},
+        )
+
+    transport(client, handler)
+    with pytest.raises(OpenRouterError, match="in-flight budget reached"):
+        client.complete("model", [])
+    assert len(calls) == 1
+
+
 def test_request_start_pacing(client, monkeypatch):
     client.settings = client.settings.with_overrides(request_interval=3.1)
     now = [0.0]

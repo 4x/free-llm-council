@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import math
 import threading
 import time
 from datetime import UTC, datetime
@@ -42,19 +43,26 @@ class OpenRouterClient:
                 time.sleep(delay)
             self._next_request = time.monotonic() + self.settings.request_interval
 
-    def _retry_delay(self, response: httpx.Response, attempt: int) -> float:
+    def _retry_after(self, response: httpx.Response) -> float | None:
         value = response.headers.get("Retry-After")
-        if value:
+        if value is None:
+            return None
+        try:
+            delay = float(value)
+            return max(0.0, delay) if math.isfinite(delay) else None
+        except ValueError:
             try:
-                return max(0.0, float(value))
-            except ValueError:
-                try:
-                    date = parsedate_to_datetime(value)
-                    if date.tzinfo is None:
-                        date = date.replace(tzinfo=UTC)
-                    return max(0.0, (date - datetime.now(UTC)).total_seconds())
-                except (ValueError, TypeError, OverflowError):
-                    pass
+                date = parsedate_to_datetime(value)
+                if date.tzinfo is None:
+                    date = date.replace(tzinfo=UTC)
+                return max(0.0, (date - datetime.now(UTC)).total_seconds())
+            except (ValueError, TypeError, OverflowError):
+                return None
+
+    def _retry_delay(self, response: httpx.Response, attempt: int) -> float:
+        retry_after = self._retry_after(response)
+        if retry_after is not None:
+            return retry_after
         return min(2.0**attempt, self.settings.max_retry_wait)
 
     def _request(self, method: str, path: str, **kwargs: Any) -> dict[str, Any]:
@@ -88,9 +96,21 @@ class OpenRouterClient:
                     status = int(detail.get("code", status))
                 except (ValueError, TypeError):
                     pass
-            retryable = status in {429, 500, 502, 503, 504}
+            metadata = detail.get("metadata")
+            in_flight_budget = (
+                isinstance(metadata, dict)
+                and metadata.get("limit_source") == "openrouter_in_flight_budget"
+            )
+            retry_after = self._retry_after(response) if status == 402 else None
+            retryable = status in {429, 500, 502, 503, 504} or (
+                status == 402 and in_flight_budget and retry_after is not None
+            )
             if retryable and attempt < self.settings.max_retries:
-                delay = self._retry_delay(response, attempt)
+                delay = (
+                    retry_after
+                    if status == 402 and retry_after is not None
+                    else self._retry_delay(response, attempt)
+                )
                 # Do not retry earlier than Retry-After, or wait unboundedly for a daily quota.
                 if delay <= self.settings.max_retry_wait:
                     logger.warning(

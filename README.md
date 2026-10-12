@@ -244,9 +244,13 @@ any model that already errored). This avoids repeating a known-failing endpoint.
   protect against catalog changes. A free catalog entry is not proof it will be
   available to your account; quotas, outages, and context limits can still fail calls.
 - All member requests are attempted, with bounded concurrency and global request-start
-  spacing. Retries honor `Retry-After`; waits longer than `MAX_RETRY_WAIT` fail rather
-  than sleeping indefinitely or retrying too early. Transient HTTP/API errors are
-  retried, but ambiguous network timeouts are not, to avoid duplicate paid work.
+  spacing. Retries honor `Retry-After` on 429/503 responses and on 402 responses whose
+  `error.metadata.limit_source` is `openrouter_in_flight_budget`; other 402 errors are
+  not retried. Waits longer than `MAX_RETRY_WAIT` fail rather than sleeping indefinitely
+  or retrying too early. Other transient HTTP/API errors are retried, but ambiguous
+  network timeouts are not, to avoid duplicate paid work. See [OpenRouter error handling
+  and Retry-After guidance](https://openrouter.ai/docs/api_reference/errors-and-debugging)
+  for retryable in-flight budget errors and non-retryable 402 insufficient-credit cases.
 - `MAX_TOKENS` values below zero omit the `max_tokens` field entirely so OpenRouter can
 apply the selected provider/model default; zero is invalid. The judge receives the
 original question plus **all successful answers in full**.
