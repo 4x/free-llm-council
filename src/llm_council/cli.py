@@ -1,10 +1,13 @@
-"""Command line entrypoint; stdout contains only the synthesized answer."""
+"""Command line entrypoint; stdout renders the synthesized answer as Markdown."""
 
 from __future__ import annotations
 
 import argparse
 import sys
 from collections.abc import Sequence
+
+from rich.console import Console
+from rich.markdown import Markdown
 
 from .config import LOG_LEVELS
 from .council import query
@@ -63,5 +66,5 @@ def main(argv: Sequence[str] | None = None) -> int:
     except KeyboardInterrupt:
         print("llm-council: interrupted", file=sys.stderr)
         return 130
-    print(answer)
+    Console().print(Markdown(answer), markup=False)
     return 0

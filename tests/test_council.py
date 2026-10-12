@@ -158,6 +158,7 @@ def test_partial_failure_saves_errors_and_synthesizes_successes(config, router, 
     assert result.synthesis == "Synthesized fixture answer"
     assert "1/2 council members failed; 1 valid answers remain" in caplog.text
     assert "Synthesizing 1 valid answers" in caplog.text
+    assert "beta synthesized 1 responses in" in caplog.text
     assert len(result.failures) == 1
     judge_input = json.loads(router.calls[-1]["messages"][1]["content"])
     assert len(judge_input["candidate_answers"]) == 1
@@ -167,6 +168,29 @@ def test_partial_failure_saves_errors_and_synthesizes_successes(config, router, 
         )
     assert result.markdown_path is None
     assert not config.markdown_dir.exists()
+
+
+@pytest.mark.parametrize(
+    ("duration", "expected"),
+    [
+        (0, "0 seconds"),
+        (63, "1 minute 3 seconds"),
+        (153, "2 minutes 33 seconds"),
+        (3661, "1 hour 1 minute 1 second"),
+    ],
+)
+def test_elapsed_summary_format(duration, expected):
+    from llm_council.council import _format_elapsed
+
+    assert _format_elapsed(duration) == expected
+
+
+def test_judge_summary_strips_vendor_and_free_suffix():
+    from llm_council.council import _short_model_name
+
+    assert _short_model_name("vendor/model:free") == "model"
+    assert _short_model_name("vendor/nested/model:free") == "nested/model"
+    assert _short_model_name("vendor/model") == "model"
 
 
 def test_markdown_folder_name_uses_prompt_words_and_minute_timestamp(config, router):

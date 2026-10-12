@@ -65,12 +65,11 @@ contains `requested_model`, actual `model`, `content`, `error`, and `usage`.
 Both functions accept `Path` input, `env_file`, a `Settings` object, and overrides for
 any setting below using its lowercase Python name. Set `literal_prompt=True` to treat
 a string as text even if it names an existing file; CLI `--question` always uses literal
-text. Invalid input/configuration and
-provider/storage failures raise a `CouncilError` subtype. Member failures emit a
-logging warning but do not discard successful answers or abort when Python warnings are
-configured as errors. Synthesis proceeds with **at least one valid, non-empty answer**;
-failed, empty, and token-truncated answers are excluded. If every member fails, no judge
-is called.
+text. Invalid input/configuration and provider/storage failures raise a `CouncilError`
+subtype. Member failures emit a logging warning but do not discard successful answers
+or abort when Python warnings are configured as errors. Synthesis proceeds with **at least
+one valid, non-empty answer**; failed, empty, and token-truncated answers are excluded.
+If every member fails, no judge is called.
 
 ## CLI
 
@@ -84,11 +83,12 @@ uv run llm-council -q "Explain entropy" --judge auto --judge-scope all
 python -m llm_council --help
 ```
 
-Supply exactly one of `--question` / `--file`. The CLI **always prints the synthesis
-on stdout by default**, regardless of whether saving is enabled. Progress logs and
-errors/warnings go to stderr. Errors exit with status 1; invalid CLI usage exits with
-status 2. `--no-save` disables **all persistence**, even if other save flags or `.env`
-request it. `SAVE_PROMPT=NONE` only disables prompt content, not response saving.
+Supply exactly one of `--question` / `--file`. The CLI **renders the synthesis as Markdown
+on stdout by default**, regardless of whether saving is enabled; headings, lists, emphasis,
+and code blocks are formatted for terminal reading. Progress logs and errors/warnings go
+to stderr. Errors exit with status 1; invalid CLI usage exits with status 2. `--no-save`
+disables **all persistence**, even if other save flags or `.env` request it.
+`SAVE_PROMPT=NONE` only disables prompt content, not response saving.
 
 ## Configuration
 
@@ -123,9 +123,12 @@ file copies its **contents**, not just its filename.
 
 ## Logging
 
-Standard Python `logging` reports discovery, model successes/failures, retries, and
-synthesis progress at `INFO` by default. Set `LOG_LEVEL` in `.env` to `DEBUG`, `INFO`,
-`WARNING`, `ERROR`, or `CRITICAL` (case-insensitive). Environment variables override
+Standard Python `logging` is rendered with Rich's `RichHandler` (colored levels and
+readable console formatting) and reports discovery, model successes/failures, and retries
+at `INFO` by default. At completion, the summary names the judge (without its vendor prefix
+or `:free` suffix), counts successful member responses, and includes elapsed time, e.g.
+`alpha synthesized 2 responses in 2 minutes 33 seconds:`. Set `LOG_LEVEL` in `.env` to
+`DEBUG`, `INFO`, `WARNING`, `ERROR`, or `CRITICAL` (case-insensitive). Environment variables override
 `.env`; `--log-level` or Python `log_level=` overrides both:
 
 ```bash
@@ -140,7 +143,7 @@ answer = query(prompt="Explain entropy", log_level="WARNING")
 Logs exclude prompt/answer contents and API keys. The package configures only the
 `llm_council` logger, never the root logger or HTTP-library loggers. If the embedding
 application already provides logging handlers, those are respected; otherwise one
-stderr handler is installed and reused across calls. Log level is package-wide, so
+Rich stderr handler is installed and reused across calls. Log level is package-wide, so
 concurrent calls share the most recently configured level.
 
 ## Judge choices

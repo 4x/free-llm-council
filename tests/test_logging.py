@@ -2,6 +2,7 @@ import json
 import logging
 
 import pytest
+from rich.logging import RichHandler
 
 from llm_council import ConfigurationError, Settings, query_result
 from llm_council.logging_config import configure_logging
@@ -38,10 +39,11 @@ def test_package_logging_stderr_and_no_duplicate_handlers(monkeypatch, capsys):
     configure_logging("INFO")
     configure_logging("INFO")
     assert len(package_logger.handlers) == 1
+    assert isinstance(package_logger.handlers[0], RichHandler)
     package_logger.info("Fixture progress")
     captured = capsys.readouterr()
     assert captured.out == ""
-    assert captured.err.count("INFO llm_council: Fixture progress") == 1
+    assert "Fixture progress" in captured.err
     assert root.handlers == []
 
 
@@ -63,7 +65,7 @@ def test_repeated_queries_log_progress_without_prompt_answers_or_key(config, cap
     for _ in range(2):
         query_result("Sensitive prompt π", settings=config, no_save=True)
     assert caplog.text.count("Starting council run") == 2
-    assert caplog.text.count("Synthesis complete") == 2
+    assert caplog.text.count(" synthesized 2 responses in ") == 2
     assert "Sensitive prompt" not in caplog.text
     assert "Synthesized fixture answer" not in caplog.text
     assert "fixture-key" not in caplog.text

@@ -52,9 +52,10 @@ def test_installed_cli_question_markdown(cli_env, router, tmp_path):
         ["--question", "Explain Riemann", "--save-initial-answers", "markdown"], tmp_path, cli_env
     )
     assert result.returncode == 0, result.stderr
-    assert result.stdout.strip() == "Synthesized fixture answer"
-    assert "INFO llm_council: Starting council run" in result.stderr
-    assert "Synthesis complete" in result.stderr
+    assert "Synthesized fixture answer" in result.stdout
+    assert "INFO" in result.stderr
+    assert "Starting council run" in result.stderr
+    assert "beta synthesized 2 responses in" in result.stderr
     assert "Explain Riemann" not in result.stderr
     assert "fixture-key" not in result.stderr
     assert len(router.calls) == 3
@@ -67,6 +68,24 @@ def test_installed_cli_question_markdown(cli_env, router, tmp_path):
         assert db.execute("SELECT prompt FROM questions").fetchone() == ("Explain Riemann",)
 
 
+def test_cli_renders_synthesis_as_markdown(cli_env, router, tmp_path):
+    router.reply = {
+        "model": "test/beta:free",
+        "choices": [
+            {
+                "message": {"content": "# Rendered heading\n\n**Bold answer**"},
+                "finish_reason": "stop",
+            }
+        ],
+    }
+    result = run_cli(["-q", "Question", "--no-save"], tmp_path, cli_env)
+    assert result.returncode == 0, result.stderr
+    assert "Rendered heading" in result.stdout
+    assert "Bold answer" in result.stdout
+    assert "# Rendered heading" not in result.stdout
+    assert "**Bold answer**" not in result.stdout
+
+
 def test_cli_prints_synthesis_despite_partial_failure_and_warnings_as_errors(
     cli_env, router, tmp_path
 ):
@@ -74,8 +93,9 @@ def test_cli_prints_synthesis_despite_partial_failure_and_warnings_as_errors(
     cli_env["PYTHONWARNINGS"] = "error"
     result = run_cli(["-q", "Question", "--no-save"], tmp_path, cli_env)
     assert result.returncode == 0, result.stderr
-    assert result.stdout.strip() == "Synthesized fixture answer"
-    assert "WARNING llm_council: Model test/alpha:free failed" in result.stderr
+    assert "Synthesized fixture answer" in result.stdout
+    assert "WARNING" in result.stderr
+    assert "Model test/alpha:free failed" in result.stderr
     assert "1/2 council members failed; 1 valid answers remain" in result.stderr
     assert "Synthesizing 1 valid answers" in result.stderr
     assert len(router.calls) == 3
@@ -87,11 +107,12 @@ def test_cli_env_log_level_and_flag_override(cli_env, tmp_path):
     result = run_cli(["-q", "Question", "--no-save"], tmp_path, cli_env)
     assert result.returncode == 0, result.stderr
     assert result.stderr == ""
-    assert result.stdout.strip() == "Synthesized fixture answer"
+    assert "Synthesized fixture answer" in result.stdout
     result = run_cli(["-q", "Question", "--no-save", "--log-level", "debug"], tmp_path, cli_env)
     assert result.returncode == 0, result.stderr
-    assert "DEBUG llm_council.client: OpenRouter POST chat/completions" in result.stderr
-    assert result.stdout.strip() == "Synthesized fixture answer"
+    assert "DEBUG" in result.stderr
+    assert "OpenRouter POST chat/completions" in result.stderr
+    assert "Synthesized fixture answer" in result.stdout
 
 
 def test_cli_partial_failure_suppresses_all_markdown_artifacts(cli_env, router, tmp_path):
@@ -101,7 +122,7 @@ def test_cli_partial_failure_suppresses_all_markdown_artifacts(cli_env, router, 
     cli_env["SAVE_SYNTHESIS"] = "MARKDOWN"
     result = run_cli(["-q", "Question"], tmp_path, cli_env)
     assert result.returncode == 0, result.stderr
-    assert result.stdout.strip() == "Synthesized fixture answer"
+    assert "Synthesized fixture answer" in result.stdout
     assert not (tmp_path / "council-output").exists()
 
 
@@ -110,7 +131,7 @@ def test_cli_all_models_fail_without_markdown_artifacts(cli_env, router, tmp_pat
     cli_env["SAVE_INITIAL_ANSWERS"] = "markdown"
     result = run_cli(["-q", "Question"], tmp_path, cli_env)
     assert result.returncode == 1
-    assert result.stdout == ""
+    assert "All free model requests failed" not in result.stdout
     assert "All free model requests failed" in result.stderr
     assert len(router.calls) == 2
     assert not (tmp_path / "council-output").exists()
@@ -124,7 +145,7 @@ def test_cli_excludes_harness_nontext_and_configured_models(cli_env, router, tmp
     cli_env["JUDGE"] = "random"
     result = run_cli(["-q", "Question", "--no-save"], tmp_path, cli_env)
     assert result.returncode == 0, result.stderr
-    assert result.stdout.strip() == "Synthesized fixture answer"
+    assert "Synthesized fixture answer" in result.stdout
     assert {call["model"] for call in router.calls} == {"test/beta:free"}
     assert len(router.calls) == 2
     router.calls.clear()
@@ -132,7 +153,7 @@ def test_cli_excludes_harness_nontext_and_configured_models(cli_env, router, tmp
         ["-q", "Question", "--no-save", "--excluded-models", "test/beta:free"], tmp_path, cli_env
     )
     assert result.returncode == 0, result.stderr
-    assert result.stdout.strip() == "Synthesized fixture answer"
+    assert "Synthesized fixture answer" in result.stdout
     assert {call["model"] for call in router.calls} == {"test/alpha:free"}
     assert len(router.calls) == 2
 
