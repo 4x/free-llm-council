@@ -1,0 +1,25 @@
+Add summary line
+.. in 2 minutes 33 seconds.
+
+Modify summary message to:
+"{Judge} synthesized (n_legit} responses in 2 minutes 33 seconds:"
+remove "vendor/" prefix and any ":free" suffix from Judge
+
+/commit
+
+Add --followup option, which would prepend latest synthesis as "content" in "messages"
+add --copy option, which would copy synthesis to clipboard
+e.g. uv run llm-council --followup "provide more details about that last security caveat, regarding validating file operations" --copy
+
+1. Verify that models are filtered on both prompt (`max_price') and `max_output_price`: both must be free
+2. if both --question and --file are included, send both: file content followed by question
+
+---
+
+1. Upon failure, present full error message, not just status (402 429 etc.)
+2. JUDGE_SYSTEM Prompt should not live in a .py file, but in an external .txt or .md file, referenced by JUDGE_PROMPT=path/to/prompt.md
+(Current JUDGE_SYSTEM in council.py can be retained as default/backup).
+3. Never hardcode any Model IDs - but you can recommend adding them to .env
+ ---
+
+When calling llm_council.query, `judge_prompt=path` to be exposed as optional parameter.

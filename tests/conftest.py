@@ -134,4 +134,7 @@ def config(router, tmp_path):
         duckdb_path=tmp_path / "council.duckdb",
         markdown_dir=tmp_path / "markdown",
         judge="test/beta:free",
+        free_router_model="openrouter/free",
+        auto_router_model="openrouter/auto",
+        router_models=("openrouter/free",),
     )

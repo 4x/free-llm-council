@@ -39,14 +39,17 @@ def test_text_capabilities_are_explicit_and_safe(architecture, expected):
 
 def test_council_excludes_reported_harness_and_custom_models():
     catalog = [
-        model("thinkingmachines/inkling-small:free"),
+        model("test/harness-only:free"),
         model("test/excluded"),
         model("test/tools-enabled"),
         model("test/agentic-score"),
     ]
     catalog[2]["supported_parameters"] = ["tools"]
     catalog[3]["benchmarks"] = {"artificial_analysis": {"agentic_index": 99}}
-    assert [entry["id"] for entry in council_models(catalog, ("test/excluded",))] == [
+    assert [
+        entry["id"]
+        for entry in council_models(catalog, ("test/harness-only:free", "test/excluded"))
+    ] == [
         "test/agentic-score",
         "test/tools-enabled",
     ]
@@ -66,7 +69,7 @@ def test_council_excludes_reported_harness_and_custom_models():
 def test_discovery_skips_restricted_nontext_and_unknown_members_and_judges(
     config, router, caplog, strategy, scope
 ):
-    restricted = model("thinkingmachines/inkling-small:free", context=999999)
+    restricted = model("test/harness-only:free", context=999999)
     image_input = model("test/image-input:free")
     image_input["architecture"]["input_modalities"] = ["image"]
     image_output = model("test/image-output:free")
@@ -83,14 +86,13 @@ def test_discovery_skips_restricted_nontext_and_unknown_members_and_judges(
         judge=strategy,
         judge_scope=scope,
         no_save=True,
-        excluded_models="test/excluded:free",
+        excluded_models="test/harness-only:free,test/excluded:free",
         log_level="DEBUG",
     )
     invalid_ids = {entry["id"] for entry in invalid}
     assert len(result.answers) == 2
     assert result.synthesis == "Synthesized fixture answer"
     assert all(call["model"] not in invalid_ids for call in router.calls)
-    assert "known agentic-harness-only endpoint" in caplog.text
     assert "text input/output not confirmed" in caplog.text
     assert "configured exclusion" in caplog.text
     assert all(params["input_modalities"] == ["text"] for params in router.gets)
@@ -101,14 +103,16 @@ def test_discovery_pagination_uses_raw_entries_even_when_whole_pages_are_filtere
     router.page_size = 1
     missing = model("test/unknown:free")
     del missing["architecture"]
-    router.catalog = [model("thinkingmachines/inkling-small:free"), missing] + router.catalog
-    result = query_result("Question", settings=config, no_save=True)
+    router.catalog = [model("test/harness-only:free"), missing] + router.catalog
+    result = query_result(
+        "Question", settings=config, no_save=True, excluded_models="test/harness-only:free"
+    )
     assert len(result.answers) == 2
     # Five pages: the free-price cap hides the paid fixture entry server-side.
     assert [params["offset"] for params in router.gets] == [[str(index)] for index in range(5)]
 
 
-@pytest.mark.parametrize("judge", ["thinkingmachines/inkling-small:free", "test/excluded:free"])
+@pytest.mark.parametrize("judge", ["test/harness-only:free", "test/excluded:free"])
 def test_excluded_explicit_judge_fails_before_member_calls(config, router, judge):
     router.catalog.append(model(judge))
     with pytest.raises(ConfigurationError, match="excluded"):
@@ -117,7 +121,7 @@ def test_excluded_explicit_judge_fails_before_member_calls(config, router, judge
             settings=config,
             judge=judge,
             no_save=True,
-            excluded_models="test/excluded:free",
+            excluded_models="test/harness-only:free,test/excluded:free",
         )
     assert not router.calls
 

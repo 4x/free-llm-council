@@ -286,7 +286,9 @@ def test_free_detection_is_conservative():
         image,
         model("openrouter/free"),
     ]
-    assert [entry["id"] for entry in council_models(catalog)] == [
+    assert [
+        entry["id"] for entry in council_models(catalog, router_models=("openrouter/free",))
+    ] == [
         "free-without-suffix",
         "output-free",
     ]

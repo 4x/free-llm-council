@@ -7,10 +7,6 @@ from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from typing import Any
 
-ROUTERS = {"openrouter/auto", "openrouter/free", "openrouter/bodybuilder"}
-# This endpoint returns 403 for plain chat clients despite advertising text support.
-# OpenRouter currently exposes no generic harness-eligibility flag in the catalog.
-HARNESS_ONLY_MODELS = frozenset({"thinkingmachines/inkling-small:free"})
 TEXT_CHARGES = (
     "prompt",
     "completion",
@@ -45,8 +41,6 @@ def model_exclusion_reason(
     model_id = model.get("id")
     if not isinstance(model_id, str) or not model_id:
         return "missing model ID"
-    if model_id in HARNESS_ONLY_MODELS:
-        return "known agentic-harness-only endpoint"
     if model_id in excluded_models:
         return "configured exclusion"
     if not is_text_model(model):
@@ -71,13 +65,15 @@ def is_free_model(model: dict[str, Any]) -> bool:
 
 
 def council_models(
-    catalog: list[dict[str, Any]], excluded_models: tuple[str, ...] = ()
+    catalog: list[dict[str, Any]],
+    excluded_models: tuple[str, ...] = (),
+    router_models: tuple[str, ...] = (),
 ) -> list[dict[str, Any]]:
     unique = {
         model["id"]: model
         for model in catalog
         if isinstance(model.get("id"), str)
-        and model["id"] not in ROUTERS
+        and model["id"] not in router_models
         and model_exclusion_reason(model, excluded_models) is None
         and is_free_model(model)
     }

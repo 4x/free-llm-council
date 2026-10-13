@@ -1,6 +1,7 @@
 import pytest
 
-from llm_council import ConfigurationError, judges, query_result
+from llm_council import ConfigurationError, Settings, judges, query_result
+from llm_council.models import council_models
 
 
 @pytest.mark.parametrize(
@@ -102,6 +103,65 @@ def test_intelligence_ranking_can_select_paid_judge(config):
         "Question", settings=config, judge="most-intelligent", judge_scope="all", no_save=True
     )
     assert result.judge == "test/paid"
+
+
+@pytest.mark.parametrize(
+    "strategy,variable", [("free-router", "FREE_ROUTER_MODEL"), ("auto", "AUTO_ROUTER_MODEL")]
+)
+def test_router_strategy_requires_configured_id(config, router, strategy, variable):
+    """No strategy supplies a built-in router model ID."""
+    with pytest.raises(ConfigurationError, match=variable):
+        query_result(
+            "Question",
+            settings=config,
+            judge=strategy,
+            free_router_model="",
+            auto_router_model="",
+            no_save=True,
+        )
+    assert not router.calls
+
+
+@pytest.mark.parametrize("strategy", ["free-router", "auto"])
+def test_router_strategy_uses_arbitrary_configured_id(config, router, strategy):
+    """Routing accepts operator-provided IDs, not a fixed provider namespace."""
+    result = query_result(
+        "Question",
+        settings=config,
+        judge=strategy,
+        judge_scope="all",
+        free_router_model="fixture/free-routing",
+        auto_router_model="fixture/auto-routing",
+        no_save=True,
+    )
+    expected = "fixture/free-routing" if strategy == "free-router" else "fixture/auto-routing"
+    assert result.judge_requested == expected
+    assert router.calls[-1]["model"] == expected
+    assert ("provider" in router.calls[-1]) == (strategy == "free-router")
+
+
+def test_router_ids_parse_from_environment(tmp_path, monkeypatch):
+    """Router settings are configurable with the standard precedence rules."""
+    path = tmp_path / "settings.env"
+    path.write_text(
+        "FREE_ROUTER_MODEL=fixture/router\nROUTER_MODELS=fixture/a,fixture/a, fixture/b\n",
+        encoding="utf-8",
+    )
+    for name in ("FREE_ROUTER_MODEL", "AUTO_ROUTER_MODEL", "ROUTER_MODELS"):
+        monkeypatch.delenv(name, raising=False)
+    settings = Settings.from_env(path)
+    assert settings.configured_routers == ("fixture/a", "fixture/b", "fixture/router")
+    monkeypatch.setenv("FREE_ROUTER_MODEL", "fixture/override")
+    assert Settings.from_env(path).free_router_model == "fixture/override"
+
+
+def test_no_model_specific_exclusions_without_configuration():
+    """Previously hardcoded provider IDs are ordinary entries without configuration."""
+    from conftest import model
+
+    catalog = [model("thinkingmachines/inkling-small:free"), model("openrouter/free")]
+    assert len(council_models(catalog)) == 2
+    assert not Settings().configured_routers
 
 
 def test_missing_intelligence_coverage_is_not_guessed(config, router):

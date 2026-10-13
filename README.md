@@ -118,7 +118,11 @@ against the current working directory. `--env-file` / `env_file=` selects anothe
 | `MARKDOWN_DIR` | `markdown_dir` / `--markdown-dir` | `council-output` |
 | `JUDGE` | `judge` / `--judge` | `random` |
 | `JUDGE_SCOPE` | `judge_scope` / `--judge-scope` | `free` |
-| `EXCLUDED_MODELS` | `excluded_models` / `--excluded-models` | empty (additional exclusions) |
+| `JUDGE_PROMPT` | `judge_prompt` / `--judge-prompt` | unset (built-in backup) |
+| `FREE_ROUTER_MODEL` | `free_router_model` (Python only) | empty; required for `free-router` |
+| `AUTO_ROUTER_MODEL` | `auto_router_model` (Python only) | empty; required for `auto` |
+| `ROUTER_MODELS` | `router_models` (Python only) | empty; comma-separated router IDs |
+| `EXCLUDED_MODELS` | `excluded_models` / `--excluded-models` | empty (no built-in model exclusions) |
 | `MAX_CONCURRENCY` | `max_concurrency` / `--max-concurrency` | `3` |
 | `REQUEST_INTERVAL` | `request_interval` / `--request-interval` | `3.1` seconds |
 | `REQUEST_TIMEOUT` | `timeout` / `--timeout` | `120` seconds/request |
@@ -149,7 +153,7 @@ uv run llm-council -q "Explain entropy" --log-level error > synthesis.md
 answer = query(prompt="Explain entropy", log_level="WARNING")
 ```
 
-Logs exclude prompt/answer contents and API keys. The package configures only the
+Failure and retry logs include the full provider error message and nested metadata, not just a status code. Transport failures, non-JSON error bodies, and generation errors retain their details too. The configured API key is redacted. Successful-run logs omit prompt/answer contents, but provider errors can echo submitted data; treat stderr/log files as sensitive. If all members fail, the raised error also lists each member's failure, even when warning logs are disabled. The package configures only the
 `llm_council` logger, never the root logger or HTTP-library loggers. If the embedding
 application already provides logging handlers, those are respected; otherwise one
 Rich stderr handler is installed and reused across calls. Log level is package-wide, so
@@ -161,8 +165,8 @@ concurrent calls share the most recently configured level.
 |---|---|
 | `random` | Random eligible catalog model; default scope is free. |
 | `round-robin` | Rotate through sorted eligible IDs; thread-safe **within one Python process**. A new CLI process starts at the first ID. No hidden state file. |
-| `free-router` or `openrouter/free` | Let OpenRouter randomly route to an available free model. Actual selected model is recorded. |
-| `auto` or `openrouter/auto` | Let OpenRouter choose for the task; requires `judge_scope="all"` / `--judge-scope all` because it may cost money. |
+| `free-router` | Use the ID configured in `FREE_ROUTER_MODEL`; actual routed model is recorded. Requires configuration. |
+| `auto` | Use the ID configured in `AUTO_ROUTER_MODEL`; requires configuration and `judge_scope="all"` / `--judge-scope all` because it may cost money. |
 | `most-intelligent` | First eligible model from OpenRouter's `intelligence-high-to-low` ranking with `min_intelligence_index=0`. Requires published benchmark coverage; raises an actionable error if none match. This is a benchmark heuristic, not a task-specific guarantee. |
 | `largest-context` | Largest advertised context window; useful when combining many long answers. Not an intelligence ranking. |
 | Exact model ID | Fixed, reproducible judge identity. Must be a text model in the current catalog; paid models require scope `all`. |
@@ -170,6 +174,20 @@ concurrent calls share the most recently configured level.
 `JUDGE_SCOPE=all` broadens **judge selection only**. Initial council members are always
 free. Judge selection is validated before sending prompts to members. Router selections
 can vary, so inspect `result.judge`, not just `result.judge_requested`.
+
+### External judge prompt
+Both `query()` and `query_result()` expose the optional keyword-only parameter `judge_prompt: str | Path | None = None`. A supplied path overrides `JUDGE_PROMPT` from the environment or `.env` (and a supplied `Settings` object). Omit it or pass `None` to preserve configuration; pass `""` to select the built-in backup.
+
+```python
+from pathlib import Path
+from llm_council import query
+
+answer = query("Explain entropy", judge_prompt=Path("prompts/judge.md"))
+```
+
+Edit [prompts/judge.md](prompts/judge.md) and set `JUDGE_PROMPT=prompts/judge.md` in your local environment file. UTF-8 `.txt` and `.md` files (including BOM) work. Relative paths resolve from the current working directory, including when `--env-file` points elsewhere. Python `judge_prompt="path/to/prompt.md"` and CLI `--judge-prompt path/to/prompt.md` override the environment. The exact file contents are sent as the system message to every judge/fallback. Missing, unreadable, invalid UTF-8, or blank files fail before discovery, inference, or saving. Unset/blank `JUDGE_PROMPT` uses the retained `JUDGE_SYSTEM` backup.
+
+No model IDs are built into application code. Ordinary strategies discover IDs from the live catalog. For routing, you can set `FREE_ROUTER_MODEL=openrouter/free` and/or `AUTO_ROUTER_MODEL=openrouter/auto` in your local environment file. These IDs are automatically excluded from individual council/ranked judge selection; `ROUTER_MODELS` lists additional router IDs. An exact configured router ID works as `JUDGE` too. Copy the recommended router/exclusion settings from [.env.example](.env.example) to preserve the previous exclusions; installing the package alone supplies no model-specific exclusions.
 
 ## Storage contract
 
@@ -243,19 +261,9 @@ any model that already errored). This avoids repeating a known-failing endpoint.
 - Free detection requires explicitly zero prompt and completion/output prices, checks
   optional request, reasoning, and cache charges if present, and rejects conditional pricing
   overrides.
-  Non-text models and routers are not council members. No `:free` suffix is fabricated.
-- `thinkingmachines/inkling-small:free` is excluded from council members and judges
-  because it returns a harness-only 403 for this plain-chat workflow. OpenRouter's
-  catalog does **not** currently expose a generic harness-eligibility flag, so this is
-  a narrow known-endpoint exclusion, not a guarantee that every restricted model is
-  detectable. Tool support and agentic benchmark scores are not access restrictions.
-- Add other unavailable/restricted endpoints via comma-separated `EXCLUDED_MODELS`
-  in `.env`, `--excluded-models provider/model:free,provider/other:free`, or Python
-  `excluded_models=("provider/model:free",)`. These additional exclusions apply to
-  council members and catalog-selected judges, including paid judges; an explicit
-  excluded judge is rejected before member calls. Overrides replace the additional
-  list, but do not remove the built-in Inkling exclusion. DEBUG logs explain skipped
-  models. OpenRouter's `auto`/`free-router` judges choose their underlying model
+  Non-text models and configured routers are not council members. No `:free` suffix is fabricated.
+- Restricted/harness-only endpoints must be configured in `EXCLUDED_MODELS`; there is no built-in ID blacklist. The example environment recommends `thinkingmachines/inkling-small:free` because it returned a harness-only 403 for this workflow. Tool support and agentic scores alone do not establish access restrictions.
+- Configure unavailable/restricted endpoints via comma-separated `EXCLUDED_MODELS` in your local environment file, `--excluded-models provider/model:free,provider/other:free`, or Python `excluded_models=("provider/model:free",)`. Exclusions apply to members and judges, including configured routers and paid judges; explicit excluded judges are rejected before member calls. Overrides replace the entire list. DEBUG logs explain skipped models. OpenRouter's `auto`/`free-router` judges choose their underlying model
   server-side, so local exclusions cannot constrain those router decisions; use a
   catalog-selected or explicit judge if you need that guarantee.
 - Free calls additionally constrain provider prompt/output pricing to zero to

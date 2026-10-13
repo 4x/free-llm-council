@@ -41,6 +41,9 @@ def parser() -> argparse.ArgumentParser:
     )
     result.add_argument("--judge", help="Judge strategy or OpenRouter model ID (default: random)")
     result.add_argument(
+        "--judge-prompt", help="UTF-8 judge system prompt file (overrides JUDGE_PROMPT)"
+    )
+    result.add_argument(
         "--judge-scope", choices=("free", "all"), help="Allow paid judges with 'all'"
     )
     result.add_argument("--duckdb-path", help="DuckDB file (default: council.duckdb)")

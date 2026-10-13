@@ -35,7 +35,7 @@ def good():
     }
 
 
-def test_retries_429_honors_retry_after(client, monkeypatch):
+def test_retries_429_honors_retry_after(client, monkeypatch, caplog):
     calls = []
     waits = []
     clock = [0.0]
@@ -61,6 +61,7 @@ def test_retries_429_honors_retry_after(client, monkeypatch):
     answer = client.complete("requested/model", [{"role": "user", "content": "Question"}])
     assert answer.model == "actual/model"
     assert len(calls) == 2 and waits == [5.0]
+    assert "429: slow down" in caplog.text
 
 
 def test_retry_after_over_cap_fails_without_early_retry(client):
@@ -294,7 +295,7 @@ def test_ambiguous_timeouts_are_not_retried(client):
         raise httpx.ReadTimeout("already submitted", request=request)
 
     transport(client, handler)
-    with pytest.raises(OpenRouterError, match="ReadTimeout"):
+    with pytest.raises(OpenRouterError, match="ReadTimeout.*already submitted"):
         client.complete("model", [])
     assert len(calls) == 1
 
@@ -319,7 +320,78 @@ def test_malformed_and_incomplete_responses(client, payload):
 
 def test_non_json_response(client):
     transport(client, lambda _: httpx.Response(502, text="upstream HTML"))
-    with pytest.raises(OpenRouterError, match="non-JSON"):
+    with pytest.raises(OpenRouterError, match="non-JSON.*upstream HTML"):
+        client.complete("model", [])
+
+
+@pytest.mark.parametrize("status", [402, 429])
+def test_full_provider_error_and_metadata_are_preserved_and_redacted(client, status):
+    """Keep nested upstream diagnostics and redact the key in every field."""
+    client.settings = client.settings.with_overrides(max_retries=0)
+    transport(
+        client,
+        lambda _: httpx.Response(
+            status,
+            json={
+                "error": {
+                    "message": "Account cannot run this request: secret-key",
+                    "metadata": {"raw": "Provider detail secret-key", "provider_name": "Fixture"},
+                }
+            },
+        ),
+    )
+    with pytest.raises(OpenRouterError) as caught:
+        client.complete("model", [])
+    text = str(caught.value)
+    assert caught.value.status_code == status
+    assert "Account cannot run this request" in text
+    assert "Provider detail" in text and "Fixture" in text
+    assert "secret-key" not in text
+    assert text.count("[redacted]") == 2
+
+
+def test_generation_error_preserves_detail(client):
+    """Errors inside answer choices keep their provider explanation."""
+    transport(
+        client,
+        lambda _: httpx.Response(
+            200,
+            json={"choices": [{"error": {"message": "generation quota secret-key"}}]},
+        ),
+    )
+    with pytest.raises(OpenRouterError, match="generation quota \\[redacted\\]"):
+        client.complete("model", [])
+
+
+def test_provider_specific_error_code_is_preserved(client):
+    """HTTP status must not replace a provider's distinct diagnostic code."""
+    transport(
+        client,
+        lambda _: httpx.Response(
+            402, json={"error": {"code": "account_suspended", "message": "Contact support"}}
+        ),
+    )
+    with pytest.raises(OpenRouterError) as caught:
+        client.complete("model", [])
+    assert "account_suspended" in str(caught.value)
+    assert "Contact support" in str(caught.value)
+
+
+def test_generation_error_code_is_preserved(client):
+    """Generation errors without a message still carry useful diagnostic codes."""
+    transport(
+        client,
+        lambda _: httpx.Response(200, json={"choices": [{"error": {"code": 429}}]}),
+    )
+    with pytest.raises(OpenRouterError) as caught:
+        client.complete("model", [])
+    assert "429" in str(caught.value)
+
+
+def test_string_error_is_preserved(client):
+    """Non-object provider errors should not collapse to an HTTP status."""
+    transport(client, lambda _: httpx.Response(402, json={"error": "payment required"}))
+    with pytest.raises(OpenRouterError, match="402: payment required"):
         client.complete("model", [])
 
 

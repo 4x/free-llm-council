@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import logging
 import math
 import threading
@@ -65,6 +66,28 @@ class OpenRouterClient:
             return retry_after
         return min(2.0**attempt, self.settings.max_retry_wait)
 
+    def _redact(self, message: str) -> str:
+        """Remove the configured API key from diagnostics, including JSON-escaped keys."""
+        if self.settings.api_key:
+            for key in (self.settings.api_key, json.dumps(self.settings.api_key)[1:-1]):
+                message = message.replace(key, "[redacted]")
+        return message
+
+    def _error_detail(self, error: Any, status: int | None = None) -> str:
+        """Preserve provider messages and nested diagnostic metadata without truncation."""
+        if isinstance(error, dict):
+            message = str(error.get("message", "Provider error"))
+            extra = {
+                key: value
+                for key, value in error.items()
+                if key != "message" and not (key == "code" and value == status)
+            }
+            if extra:
+                message += "; " + json.dumps(extra, ensure_ascii=False)
+        else:
+            message = str(error)
+        return self._redact(message)
+
     def _request(self, method: str, path: str, **kwargs: Any) -> dict[str, Any]:
         for attempt in range(self.settings.max_retries + 1):
             logger.debug("OpenRouter %s %s (attempt %d)", method, path, attempt + 1)
@@ -75,17 +98,23 @@ class OpenRouterClient:
             except httpx.RequestError as exc:
                 # A timeout may already have consumed tokens; do not blindly duplicate inference.
                 raise OpenRouterError(
-                    f"OpenRouter transport failure ({type(exc).__name__})."
+                    self._redact(f"OpenRouter transport failure ({type(exc).__name__}): {exc}")
                 ) from exc
             try:
                 payload = response.json()
             except ValueError as exc:
                 raise OpenRouterError(
-                    f"OpenRouter returned non-JSON data (HTTP {response.status_code}).",
+                    self._redact(
+                        f"OpenRouter returned non-JSON data (HTTP {response.status_code}): "
+                        f"{response.text}"
+                    ),
                     response.status_code,
                 ) from exc
             if not isinstance(payload, dict):
-                raise OpenRouterError("OpenRouter returned an invalid response envelope.")
+                raise OpenRouterError(
+                    self._redact(f"OpenRouter returned an invalid response envelope: {payload}"),
+                    response.status_code,
+                )
             error = payload.get("error")
             if response.is_success and not error:
                 return payload
@@ -101,6 +130,7 @@ class OpenRouterClient:
                 isinstance(metadata, dict)
                 and metadata.get("limit_source") == "openrouter_in_flight_budget"
             )
+            message = self._error_detail(error if error else payload, status)
             retry_after = self._retry_after(response) if status == 402 else None
             retryable = status in {429, 500, 502, 503, 504} or (
                 status == 402 and in_flight_budget and retry_after is not None
@@ -114,8 +144,9 @@ class OpenRouterClient:
                 # Do not retry earlier than Retry-After, or wait unboundedly for a daily quota.
                 if delay <= self.settings.max_retry_wait:
                     logger.warning(
-                        "OpenRouter status %d; retrying %s %s in %.1fs (retry %d/%d)",
+                        "OpenRouter error %d: %s; retrying %s %s in %.1fs (retry %d/%d)",
                         status,
+                        message,
                         method,
                         path,
                         delay,
@@ -127,9 +158,6 @@ class OpenRouterClient:
                     if method != "POST":
                         time.sleep(delay)
                     continue
-            message = str(detail.get("message", f"HTTP {status}"))
-            if self.settings.api_key:
-                message = message.replace(self.settings.api_key, "[redacted]")
             raise OpenRouterError(f"OpenRouter error {status}: {message}", status)
         raise AssertionError("Retry loop must return or raise")
 
@@ -196,7 +224,8 @@ class OpenRouterClient:
             raise OpenRouterError(f"Model {model} returned no answer choices.")
         choice = choices[0]
         if choice.get("error"):
-            raise OpenRouterError(f"Model {model} returned a generation error.")
+            detail = self._error_detail(choice["error"])
+            raise OpenRouterError(f"Model {model} returned a generation error: {detail}")
         if choice.get("finish_reason") == "length":
             raise OpenRouterError(
                 f"Model {model} exhausted MAX_TOKENS; increase it to obtain a complete answer."

@@ -25,6 +25,11 @@ def cli_env(router):
         SAVE_INITIAL_ANSWERS="NO",
         SAVE_SYNTHESIS="NO",
         LOG_LEVEL="INFO",
+        ROUTER_MODELS="openrouter/free",
+        FREE_ROUTER_MODEL="",
+        AUTO_ROUTER_MODEL="",
+        JUDGE_PROMPT="",
+        EXCLUDED_MODELS="",
     )
     return env
 
@@ -159,6 +164,7 @@ def test_cli_prints_synthesis_despite_partial_failure_and_warnings_as_errors(
     assert "Synthesized fixture answer" in result.stdout
     assert "WARNING" in result.stderr
     assert "Model test/alpha:free failed" in result.stderr
+    assert "fixture unavailable" in " ".join(result.stderr.split())
     assert "1/2 council members failed; 1 valid answers remain" in result.stderr
     assert "Synthesizing 1 valid answers" in result.stderr
     assert len(router.calls) == 3
@@ -203,8 +209,8 @@ def test_cli_all_models_fail_without_markdown_artifacts(cli_env, router, tmp_pat
 def test_cli_excludes_harness_nontext_and_configured_models(cli_env, router, tmp_path):
     image = model("test/image:free")
     image["architecture"]["output_modalities"] = ["image"]
-    router.catalog.extend([model("thinkingmachines/inkling-small:free"), image])
-    cli_env["EXCLUDED_MODELS"] = "test/alpha:free"
+    router.catalog.extend([model("test/harness-only:free"), image])
+    cli_env["EXCLUDED_MODELS"] = "test/harness-only:free,test/alpha:free"
     cli_env["JUDGE"] = "random"
     result = run_cli(["-q", "Question", "--no-save"], tmp_path, cli_env)
     assert result.returncode == 0, result.stderr
@@ -213,7 +219,15 @@ def test_cli_excludes_harness_nontext_and_configured_models(cli_env, router, tmp
     assert len(router.calls) == 2
     router.calls.clear()
     result = run_cli(
-        ["-q", "Question", "--no-save", "--excluded-models", "test/beta:free"], tmp_path, cli_env
+        [
+            "-q",
+            "Question",
+            "--no-save",
+            "--excluded-models",
+            "test/harness-only:free,test/beta:free",
+        ],
+        tmp_path,
+        cli_env,
     )
     assert result.returncode == 0, result.stderr
     assert "Synthesized fixture answer" in result.stdout
@@ -264,6 +278,80 @@ def test_module_no_save_overrides_env_and_flags(cli_env, tmp_path):
     )
     assert result.returncode == 0, result.stderr
     assert list(tmp_path.iterdir()) == []
+
+
+def test_cli_external_judge_prompt_env_and_flag_override(cli_env, router, tmp_path):
+    """Installed CLI resolves prompt files against cwd and honors its override flag."""
+    (tmp_path / "judge.md").write_text("Custom π judge\n", encoding="utf-8-sig")
+    (tmp_path / "override.txt").write_text("Override judge", encoding="utf-8")
+    (tmp_path / ".env").write_text("JUDGE_PROMPT=judge.md\n", encoding="utf-8")
+    cli_env.pop("JUDGE_PROMPT")
+    result = run_cli(["-q", "Question", "--no-save"], tmp_path, cli_env)
+    assert result.returncode == 0, result.stderr
+    assert router.calls[-1]["messages"][0]["content"] == "Custom π judge\n"
+    result = run_cli(
+        ["-q", "Question", "--no-save", "--judge-prompt", "override.txt"], tmp_path, cli_env
+    )
+    assert result.returncode == 0, result.stderr
+    assert router.calls[-1]["messages"][0]["content"] == "Override judge"
+
+
+def test_cli_generation_error_keeps_code_metadata_and_redacts_saved_errors(
+    cli_env, router, tmp_path
+):
+    """Provider diagnostics reach stderr and DuckDB without leaking the API key."""
+    router.model_replies["test/alpha:free"] = {
+        "choices": [
+            {
+                "error": {
+                    "code": "provider_quota",
+                    "message": "Quota reached for fixture-key",
+                    "metadata": {"raw": "Reset tomorrow; fixture-key", "provider_name": "Fixture"},
+                }
+            }
+        ]
+    }
+    cli_env["SAVE_INITIAL_ANSWERS"] = "DUCKDB"
+    result = run_cli(["-q", "Question"], tmp_path, cli_env)
+    assert result.returncode == 0, result.stderr
+    output = " ".join(result.stderr.split())
+    assert "provider_quota" in output and "Reset tomorrow" in output
+    assert "fixture-key" not in output and "[redacted]" in output
+    assert "Synthesized fixture answer" in result.stdout
+    with duckdb.connect(str(tmp_path / "council.duckdb")) as db:
+        error = db.execute("SELECT error FROM responses WHERE error IS NOT NULL").fetchone()[0]
+    assert "provider_quota" in error and "Reset tomorrow" in error
+    assert "fixture-key" not in error and error.count("[redacted]") == 2
+
+
+@pytest.mark.parametrize("path_kind", ["missing", "directory", "invalid-utf8", "blank"])
+def test_cli_invalid_judge_prompt_is_actionable_without_requests(
+    cli_env, router, tmp_path, path_kind
+):
+    """Prompt-file validation produces normal CLI errors before network or storage."""
+    path = tmp_path / "judge.md"
+    if path_kind == "directory":
+        path.mkdir()
+    elif path_kind == "invalid-utf8":
+        path.write_bytes(b"\xff")
+    elif path_kind == "blank":
+        path.write_text(" \n", encoding="utf-8")
+    result = run_cli(["-q", "Question", "--judge-prompt", str(path)], tmp_path, cli_env)
+    assert result.returncode == 1
+    assert "JUDGE_PROMPT" in result.stderr and "Traceback" not in result.stderr
+    assert not router.calls and not router.gets
+    assert not (tmp_path / "council.duckdb").exists()
+
+
+def test_cli_all_failures_are_visible_with_logs_disabled(cli_env, router, tmp_path):
+    """The terminal error includes every provider failure even at CRITICAL verbosity."""
+    router.fail_models.update({"test/alpha:free", "test/beta:free"})
+    cli_env["LOG_LEVEL"] = "CRITICAL"
+    result = run_cli(["-q", "Question", "--no-save"], tmp_path, cli_env)
+    assert result.returncode == 1
+    assert "test/alpha:free: OpenRouter error 503: fixture unavailable" in result.stderr
+    assert "test/beta:free: OpenRouter error 503: fixture unavailable" in result.stderr
+    assert "fixture-key" not in result.stderr
 
 
 def test_cli_env_file(cli_env, tmp_path):

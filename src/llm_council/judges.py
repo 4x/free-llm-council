@@ -10,8 +10,6 @@ from .client import OpenRouterClient
 from .config import Settings
 from .errors import ConfigurationError
 from .models import (
-    HARNESS_ONLY_MODELS,
-    ROUTERS,
     council_models,
     is_free_model,
     model_exclusion_reason,
@@ -25,24 +23,33 @@ _round_robin_positions: dict[tuple[str, ...], int] = {}
 def select_judge(
     settings: Settings, catalog: list[dict[str, Any]], client: OpenRouterClient
 ) -> tuple[str, bool]:
+    """Select a catalog model or an explicitly configured router, respecting paid opt-in."""
     strategy = settings.judge.strip()
     normalized = strategy.lower()
-    requested_id = {"free-router": "openrouter/free", "auto": "openrouter/auto"}.get(
-        normalized, strategy
-    )
-    if requested_id in HARNESS_ONLY_MODELS or requested_id in settings.excluded_models:
+    if normalized in {"free-router", "auto"}:
+        variable = "FREE_ROUTER_MODEL" if normalized == "free-router" else "AUTO_ROUTER_MODEL"
+        requested_id = (
+            settings.free_router_model
+            if normalized == "free-router"
+            else settings.auto_router_model
+        )
+        if not requested_id:
+            raise ConfigurationError(f"Set {variable} to a router model ID for JUDGE={normalized}.")
+    else:
+        requested_id = strategy
+    if requested_id in settings.excluded_models:
         raise ConfigurationError(
             f"Judge model {requested_id!r} is excluded from plain-chat queries."
         )
-    if normalized in {"free-router", "openrouter/free"}:
-        return "openrouter/free", True
-    if normalized in {"auto", "openrouter/auto"}:
+    if settings.free_router_model and requested_id == settings.free_router_model:
+        return requested_id, True
+    if settings.auto_router_model and requested_id == settings.auto_router_model:
         if settings.judge_scope != "all":
             raise ConfigurationError(
                 "The auto judge may use paid models; set judge_scope='all' "
                 "or use 'free-router' for free routing."
             )
-        return "openrouter/auto", False
+        return requested_id, False
     if normalized not in STRATEGIES:
         matches = [model for model in catalog if model.get("id") == strategy]
         if not matches:
@@ -63,13 +70,13 @@ def select_judge(
         # Scope 'all' selects paid judges too, so query without the free-price filters.
         catalog = client.list_models(free_only=False)
     eligible = (
-        council_models(catalog, settings.excluded_models)
+        council_models(catalog, settings.excluded_models, settings.configured_routers)
         if settings.judge_scope == "free"
         else [
             model
             for model in catalog
             if model_exclusion_reason(model, settings.excluded_models) is None
-            and model["id"] not in ROUTERS
+            and model["id"] not in settings.configured_routers
         ]
     )
     ids = sorted({model["id"] for model in eligible})

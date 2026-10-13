@@ -56,6 +56,11 @@ class Settings:
     duckdb_path: Path = Path("council.duckdb")
     markdown_dir: Path = Path("council-output")
     judge: str = "random"
+    judge_prompt: Path | None = None
+    free_router_model: str = ""
+    auto_router_model: str = ""
+    router_models: tuple[str, ...] = ()
+
     judge_scope: Literal["free", "all"] = "free"
     max_concurrency: int = 3
     request_interval: float = 3.1
@@ -65,6 +70,21 @@ class Settings:
     max_tokens: int = 2048
     log_level: str = "INFO"
     excluded_models: tuple[str, ...] = ()
+
+    @property
+    def configured_routers(self) -> tuple[str, ...]:
+        """Return configured router IDs to exclude from individual member selection."""
+        return tuple(
+            dict.fromkeys(
+                model_id
+                for model_id in (
+                    *self.router_models,
+                    self.free_router_model,
+                    self.auto_router_model,
+                )
+                if model_id
+            )
+        )
 
     @classmethod
     def from_env(cls, env_file: str | Path | None = None) -> Settings:
@@ -79,6 +99,10 @@ class Settings:
             "duckdb_path": "DUCKDB_PATH",
             "markdown_dir": "MARKDOWN_DIR",
             "judge": "JUDGE",
+            "judge_prompt": "JUDGE_PROMPT",
+            "free_router_model": "FREE_ROUTER_MODEL",
+            "auto_router_model": "AUTO_ROUTER_MODEL",
+            "router_models": "ROUTER_MODELS",
             "judge_scope": "JUDGE_SCOPE",
             "max_concurrency": "MAX_CONCURRENCY",
             "request_interval": "REQUEST_INTERVAL",
@@ -101,19 +125,24 @@ class Settings:
             raise ConfigurationError(f"Unknown settings: {', '.join(sorted(unknown))}")
         converted = {key: value for key, value in overrides.items() if value is not None}
         try:
-            if "excluded_models" in converted:
-                value = converted["excluded_models"]
-                if isinstance(value, str):
-                    value = value.split(",")
-                if not isinstance(value, (tuple, list)) or any(
-                    not isinstance(item, str) for item in value
-                ):
-                    raise ValueError(
-                        "excluded_models must be model IDs or a comma-separated string"
+            for key in ("excluded_models", "router_models"):
+                if key in converted:
+                    value = converted[key]
+                    if isinstance(value, str):
+                        value = value.split(",")
+                    if not isinstance(value, (tuple, list)) or any(
+                        not isinstance(item, str) for item in value
+                    ):
+                        raise ValueError(f"{key} must be model IDs or a comma-separated string")
+                    converted[key] = tuple(
+                        dict.fromkeys(item.strip() for item in value if item.strip())
                     )
-                converted["excluded_models"] = tuple(
-                    dict.fromkeys(item.strip() for item in value if item.strip())
-                )
+            if "judge_prompt" in converted:
+                value = converted["judge_prompt"]
+                converted["judge_prompt"] = Path(value) if value else None
+            for key in ("free_router_model", "auto_router_model"):
+                if key in converted:
+                    converted[key] = str(converted[key]).strip()
             if "log_level" in converted:
                 converted["log_level"] = str(converted["log_level"]).strip().upper()
             for key in ("save_prompt", "save_initial_answers", "save_synthesis"):
