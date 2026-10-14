@@ -142,19 +142,64 @@ def test_failed_judge_falls_back_to_a_successful_member(config, router, caplog):
     result = query_result("Question", settings=config, judge="test/beta:free", no_save=True)
     assert result.judge_requested == "test/alpha:free"
     assert result.synthesis == "Synthesized fixture answer"
-    assert [call["model"] for call in router.calls] == [
+    assert sorted(call["model"] for call in router.calls[:2]) == [
         "test/alpha:free",
         "test/beta:free",
-        "test/alpha:free",
     ]
+    assert router.calls[2]["model"] == "test/alpha:free"
     assert "Synthesizing 1 valid answers with test/alpha:free" in caplog.text
+
+
+def test_judge_synthesis_failure_fallback_still_writes_markdown(config, router):
+    """If the primary judge fails at synthesis time, fallback synthesis still saves Markdown."""
+    calls_for_beta = 0
+    original_post = router.server.RequestHandlerClass.do_POST
+
+    def do_POST(handler):
+        nonlocal calls_for_beta
+        length = int(handler.headers["Content-Length"])
+        raw = handler.rfile.read(length)
+        body = json.loads(raw)
+        is_judge = body["messages"][0]["role"] == "system"
+        if is_judge and body["model"] == "test/beta:free":
+            calls_for_beta += 1
+            router.calls.append({**body, "authorization": handler.headers.get("Authorization")})
+            handler.send({"error": {"code": 503, "message": "judge unavailable"}}, 503)
+            return
+        from io import BytesIO
+
+        handler.rfile = BytesIO(raw)
+        original_post(handler)
+
+    router.server.RequestHandlerClass.do_POST = do_POST
+    try:
+        result = query_result(
+            "Question",
+            settings=config,
+            judge="test/beta:free",
+            save_synthesis="both",
+        )
+    finally:
+        router.server.RequestHandlerClass.do_POST = original_post
+    assert calls_for_beta == 1
+    assert result.judge_requested == "test/alpha:free"
+    assert result.markdown_path is not None
+    assert result.markdown_path.is_file()
+    assert result.markdown_path.parent == config.markdown_dir
+    assert result.markdown_path.name.startswith("question-synthesis-")
+    assert "Synthesized fixture answer" in result.markdown_path.read_text(encoding="utf-8")
 
 
 def test_partial_failure_saves_errors_and_synthesizes_successes(config, router, caplog):
     router.fail_models.add("test/alpha:free")
     with warnings.catch_warnings():
         warnings.simplefilter("error")
-        result = query_result("Question", settings=config, save_initial_answers="both")
+        result = query_result(
+            "Question",
+            settings=config,
+            save_initial_answers="both",
+            save_synthesis="both",
+        )
     assert result.synthesis == "Synthesized fixture answer"
     assert "1/2 council members failed; 1 valid answers remain" in caplog.text
     assert "Synthesizing 1 valid answers" in caplog.text
@@ -166,8 +211,11 @@ def test_partial_failure_saves_errors_and_synthesizes_successes(config, router, 
         assert db.execute("SELECT count(*) FROM responses WHERE error IS NOT NULL").fetchone() == (
             1,
         )
-    assert result.markdown_path is None
-    assert not config.markdown_dir.exists()
+    assert result.markdown_path is not None
+    assert {path.name for path in result.markdown_path.iterdir()} == {
+        "initial-002-test-beta-free.md",
+        "synthesis.md",
+    }
 
 
 @pytest.mark.parametrize(
@@ -330,3 +378,44 @@ def test_missing_api_key(config, router):
     with pytest.raises(ConfigurationError, match="OPENROUTER_API_KEY"):
         query("Question", settings=config.with_overrides(api_key=""))
     assert not router.calls
+
+
+def test_query_result_previous_synthesis_and_prior_turns_alternate_roles(config, router):
+    """Both previous_synthesis and prior_turns produce alternating user/assistant messages."""
+    query_result(
+        "Followup",
+        settings=config,
+        previous_synthesis="Earlier answer",
+        no_save=True,
+    )
+    assert [msg["role"] for msg in router.calls[0]["messages"]] == ["user", "assistant", "user"]
+    assert router.calls[0]["messages"][1] == {"role": "assistant", "content": "Earlier answer"}
+    assert [msg["role"] for msg in router.calls[-1]["messages"]] == [
+        "system",
+        "user",
+        "assistant",
+        "user",
+    ]
+
+    router.calls.clear()
+    query_result(
+        "Turn 3 question",
+        settings=config,
+        prior_turns=[("Turn 1 question", "Turn 1 answer"), ("Turn 2 question", "Turn 2 answer")],
+        no_save=True,
+    )
+    assert router.calls[0]["messages"] == [
+        {"role": "user", "content": "Turn 1 question"},
+        {"role": "assistant", "content": "Turn 1 answer"},
+        {"role": "user", "content": "Turn 2 question"},
+        {"role": "assistant", "content": "Turn 2 answer"},
+        {"role": "user", "content": "Turn 3 question"},
+    ]
+    assert [msg["role"] for msg in router.calls[-1]["messages"]] == [
+        "system",
+        "user",
+        "assistant",
+        "user",
+        "assistant",
+        "user",
+    ]

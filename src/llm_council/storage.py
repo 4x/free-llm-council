@@ -150,12 +150,16 @@ class RunStorage:
         except (duckdb.Error, OSError, StorageError) as exc:
             raise StorageError(f"Cannot save {stage} response: {exc}") from exc
 
-    def save_markdown_artifacts(
+    def _expected_markdown_files(
         self, prompt: str, answers: tuple[ModelAnswer, ...], synthesis: ModelAnswer
-    ) -> None:
-        """Atomically write Markdown outputs after all model calls succeeded."""
+    ) -> dict[str, str]:
         files: dict[str, str] = {}
-        if self.settings.save_prompt.markdown and synthesis.content and synthesis.content.strip():
+        if (
+            self.settings.save_prompt.markdown
+            and prompt.strip()
+            and synthesis.content
+            and synthesis.content.strip()
+        ):
             files["prompt.md"] = prompt
         for index, answer in enumerate(answers, 1):
             mode = self.settings.save_initial_answers
@@ -171,9 +175,30 @@ class RunStorage:
             files[self._answer_filename(synthesis, "synthesis", 0)] = self._answer_markdown(
                 synthesis, "synthesis"
             )
+        return files
+
+    @staticmethod
+    def _is_synthesis_only(files: dict[str, str]) -> bool:
+        """Return True when synthesis.md is the only Markdown file requested."""
+        return set(files.keys()) == {"synthesis.md"}
+
+    def save_markdown_artifacts(
+        self, prompt: str, answers: tuple[ModelAnswer, ...], synthesis: ModelAnswer
+    ) -> None:
+        """Atomically write requested Markdown outputs after synthesis succeeds.
+
+        When synthesis.md is the only requested file, write it directly under
+        markdown_dir as <slug>-synthesis-<stamp>.md instead of creating a
+        subfolder just to hold synthesis.md.
+        """
+        files = self._expected_markdown_files(prompt, answers, synthesis)
         if not files:
             return
         try:
+            self.settings.markdown_dir.mkdir(parents=True, exist_ok=True)
+            if self._is_synthesis_only(files):
+                self._save_single_synthesis_file(files["synthesis.md"])
+                return
             base_name = self._folder_base_name()
             staging = self.settings.markdown_dir / f".{base_name}-{uuid4().hex}.tmp"
             staging.mkdir(parents=True, exist_ok=False)
@@ -196,6 +221,34 @@ class RunStorage:
         except OSError as exc:
             raise StorageError(f"Cannot save Markdown artifacts: {exc}") from exc
 
+    def _save_single_synthesis_file(self, content: str) -> None:
+        """Atomically write a lone synthesis directly under markdown_dir."""
+        base_name = self._single_file_base_name()
+        stem = base_name[: -len(".md")]
+        candidate = self.settings.markdown_dir / base_name
+        suffix = 2
+        while candidate.exists():
+            candidate = self.settings.markdown_dir / f"{stem}-{suffix}.md"
+            suffix += 1
+        staging = self.settings.markdown_dir / f".{stem}-{uuid4().hex}.tmp"
+        try:
+            staging.write_text(content, encoding="utf-8")
+            try:
+                staging.rename(candidate)
+            except FileExistsError:
+                # A concurrent run claimed the name; pick the next free suffix.
+                suffix = 2
+                while True:
+                    candidate = self.settings.markdown_dir / f"{stem}-{suffix}.md"
+                    suffix += 1
+                    if not candidate.exists():
+                        break
+                staging.rename(candidate)
+            self.folder = candidate
+        except OSError:
+            staging.unlink(missing_ok=True)
+            raise
+
     def _answer_filename(self, answer: ModelAnswer, stage: str, index: int) -> str:
         slug = re.sub(r"[^a-zA-Z0-9_.-]+", "-", answer.requested_model)[:100]
         return f"initial-{index:03d}-{slug}.md" if stage == "initial" else "synthesis.md"
@@ -209,7 +262,7 @@ class RunStorage:
             f"{answer.content}"
         )
 
-    def _folder_base_name(self) -> str:
+    def _slug(self) -> str:
         words = [
             word
             for word in re.findall(r"[^\W_]+", self.prompt.lower())
@@ -217,7 +270,13 @@ class RunStorage:
         ][:6]
         slug = "-".join(words) or "council-run"
         slug = re.sub(r"[^a-z0-9-]+", "-", slug).strip("-")[:72] or "council-run"
-        return f"{slug}-{self._markdown_stamp}"
+        return slug
+
+    def _folder_base_name(self) -> str:
+        return f"{self._slug()}-{self._markdown_stamp}"
+
+    def _single_file_base_name(self) -> str:
+        return f"{self._slug()}-synthesis-{self._markdown_stamp}.md"
 
     def _ensure_folder(self) -> None:
         if self.folder is None:
@@ -237,3 +296,123 @@ class RunStorage:
         self._ensure_folder()
         assert self.folder is not None
         (self.folder / filename).write_text(text, encoding="utf-8")
+
+
+def export_markdown(
+    *,
+    env_file: str | Path | None = None,
+    settings: Settings | None = None,
+    **overrides: Any,
+) -> tuple[Path, ...]:
+    """Export stored DuckDB runs with non-empty syntheses into Markdown.
+
+    Multi-file runs become folders; a lone synthesis becomes a single
+    <slug>-synthesis-<stamp>.md file directly under markdown_dir.
+    Respects configured save modes ( defaulting to exporting prompt, initial answers,
+    and synthesis when none of the three are configured for Markdown) and skips runs
+    whose target folder/file and contents already exist in markdown_dir.
+    """
+    config = settings if settings is not None else Settings.from_env(env_file)
+    config = config.with_overrides(**overrides)
+    if not any(
+        mode.markdown
+        for mode in (config.save_prompt, config.save_initial_answers, config.save_synthesis)
+    ):
+        config = config.with_overrides(
+            save_prompt="markdown",
+            save_initial_answers="markdown",
+            save_synthesis="markdown",
+        )
+    if not config.duckdb_path.is_file():
+        raise StorageError(f"DuckDB file {config.duckdb_path} does not exist.")
+    exported: list[Path] = []
+    try:
+        with duckdb.connect(str(config.duckdb_path), read_only=True) as connection:
+            tables = {row[0] for row in connection.execute("SHOW TABLES").fetchall()}
+            if not {"questions", "responses"}.issubset(tables):
+                return ()
+            question_rows = connection.execute(
+                """
+                SELECT id, strftime(created_at AT TIME ZONE 'UTC', '%Y%m%dT%H%M'), prompt
+                FROM questions
+                ORDER BY created_at
+                """
+            ).fetchall()
+            for question_id, stamp, prompt in question_rows:
+                response_rows = connection.execute(
+                    """
+                    SELECT stage, requested_model, model, content
+                    FROM responses
+                    WHERE question_id = ?
+                    ORDER BY created_at
+                    """,
+                    [question_id],
+                ).fetchall()
+                initial_answers = tuple(
+                    ModelAnswer(
+                        requested_model=req_model,
+                        model=model_id,
+                        content=content,
+                    )
+                    for stage, req_model, model_id, content in response_rows
+                    if stage == "initial" and content and content.strip()
+                )
+                syntheses = [
+                    ModelAnswer(
+                        requested_model=req_model,
+                        model=model_id,
+                        content=content,
+                    )
+                    for stage, req_model, model_id, content in response_rows
+                    if stage == "synthesis" and content and content.strip()
+                ]
+                if not syntheses:
+                    continue
+                synthesis = syntheses[-1]
+                prompt_text = prompt or ""
+                storage = RunStorage(config, str(question_id), prompt_text)
+                if isinstance(stamp, str) and stamp:
+                    storage._markdown_stamp = stamp
+                expected_files = storage._expected_markdown_files(
+                    prompt_text, initial_answers, synthesis
+                )
+                if not expected_files:
+                    continue
+                if RunStorage._is_synthesis_only(expected_files):
+                    single_base = storage._single_file_base_name()
+                    stem = single_base[: -len(".md")]
+                    already_exported = False
+                    if config.markdown_dir.is_dir():
+                        for candidate in config.markdown_dir.glob(f"{stem}*.md"):
+                            if (
+                                candidate.is_file()
+                                and candidate.read_text(encoding="utf-8")
+                                == expected_files["synthesis.md"]
+                            ):
+                                already_exported = True
+                                break
+                    if already_exported:
+                        continue
+                    storage.save_markdown_artifacts(prompt_text, initial_answers, synthesis)
+                    if storage.folder is not None:
+                        exported.append(storage.folder)
+                    continue
+                base_name = storage._folder_base_name()
+                already_exported = False
+                if config.markdown_dir.is_dir():
+                    for candidate in config.markdown_dir.glob(f"{base_name}*"):
+                        if candidate.is_dir() and all(
+                            (candidate / filename).is_file()
+                            and (candidate / filename).read_text(encoding="utf-8") == content
+                            for filename, content in expected_files.items()
+                        ):
+                            already_exported = True
+                            break
+                if already_exported:
+                    continue
+                storage.save_markdown_artifacts(prompt_text, initial_answers, synthesis)
+                if storage.folder is not None:
+                    exported.append(storage.folder)
+    except (duckdb.Error, OSError) as exc:
+        raise StorageError(f"Cannot export Markdown artifacts from DuckDB: {exc}") from exc
+    return tuple(exported)

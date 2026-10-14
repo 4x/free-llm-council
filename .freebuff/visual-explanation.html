@@ -1,0 +1,152 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>llm-council — Synthesis-only Markdown, no subfolder</title>
+<style>
+:root{--bg:#0f141b;--panel:#18202c;--panel2:#1f2a3a;--ink:#e8eef6;--mut:#9fb0c3;--acc:#5cc8ff;--grn:#5fe3a1;--amb:#ffd479;--red:#ff8f8f;--line:#2b3a4f;--mono:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;--sans:system-ui,-apple-system,"Segoe UI",Roboto,Helvetica,Arial,sans-serif}
+*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--ink);font-family:var(--sans);line-height:1.55}
+.wrap{max-width:1020px;margin:0 auto;padding:28px 20px 64px}
+header.hero{background:linear-gradient(135deg,#16233a,#123247 60%,#123d3a);border:1px solid var(--line);border-radius:16px;padding:28px 26px;margin-bottom:22px}
+.kicker{color:var(--acc);font-weight:700;letter-spacing:.12em;text-transform:uppercase;font-size:12px;margin:0 0 8px}
+h1{margin:.1em 0 .3em;font-size:clamp(26px,4vw,38px);line-height:1.12}
+.sub{color:var(--mut);max-width:70ch;margin:0}
+.grid{display:grid;gap:16px}.cols2{grid-template-columns:1fr 1fr}@media(max-width:760px){.cols2{grid-template-columns:1fr}}
+.card{background:var(--panel);border:1px solid var(--line);border-radius:14px;padding:18px 18px}
+.card h2{margin:0 0 10px;font-size:19px}.card h3{margin:16px 0 8px;font-size:15px;color:var(--acc)}
+.mut{color:var(--mut)}.mono{font-family:var(--mono);font-size:13px}
+.pill{display:inline-block;padding:2px 10px;border-radius:999px;font-size:12px;font-weight:700;border:1px solid var(--line);background:var(--panel2)}
+.pill.before{color:var(--amb);border-color:#5a4a1e}.pill.after{color:var(--grn);border-color:#1e5a3c}
+.tree{background:#0b1119;border:1px solid var(--line);border-radius:10px;padding:14px;font-family:var(--mono);font-size:13px;line-height:1.7;overflow-x:auto;white-space:pre}
+.tree .hl{color:var(--grn)}.tree .dim{color:var(--mut)}.tree .warn{color:var(--amb)}
+.flow{display:flex;align-items:stretch;gap:0;flex-wrap:wrap;margin:8px 0}
+.step{flex:1 1 150px;background:var(--panel2);border:1px solid var(--line);border-radius:10px;padding:10px 12px;min-width:150px}
+.step b{display:block;font-size:13px}.step span{font-size:12px;color:var(--mut)}
+.arrow{align-self:center;padding:0 8px;color:var(--acc);font-weight:900;font-size:18px}
+table{width:100%;border-collapse:collapse;font-size:13.5px}th,td{text-align:left;padding:9px 10px;border-bottom:1px solid var(--line);vertical-align:top}th{color:var(--acc);font-size:12px;letter-spacing:.06em;text-transform:uppercase}
+code{background:#0b1119;border:1px solid var(--line);border-radius:6px;padding:1px 6px;font-family:var(--mono);font-size:12.5px}
+.callout{border-left:4px solid var(--acc);background:#12253a;border-radius:0 10px 10px 0;padding:12px 14px;margin:12px 0}
+.callout.warn{border-color:var(--amb);background:#2c2410}.callout.ok{border-color:var(--grn);background:#0f2c1f}
+.tabs{display:flex;gap:8px;margin:10px 0 0;flex-wrap:wrap}button.tab{background:var(--panel2);color:var(--ink);border:1px solid var(--line);border-radius:999px;padding:7px 14px;font-size:13px;cursor:pointer}button.tab[aria-selected="true"]{background:var(--acc);color:#06283a;border-color:var(--acc);font-weight:700}
+svg{max-width:100%;height:auto}
+footer{color:var(--mut);font-size:12.5px;margin-top:26px}
+@media(prefers-reduced-motion:reduce){*{animation:none!important;transition:none!important}}
+</style>
+</head>
+<body>
+<div class="wrap">
+<header class="hero">
+<p class="kicker">llm-council · storage change · visual explainer</p>
+<h1>Synthesis-only Markdown: no more lonely subfolder</h1>
+<p class="sub">When <code>synthesis.md</code> is the <em>only</em> Markdown artifact requested, llm-council now writes one file directly under <code>council-output/</code> — same slug + timestamp naming, with a <code>-synthesis-</code> marker and <code>.md</code> extension. Everything else still uses a per-run folder.</p>
+</header>
+
+<div class="grid cols2">
+<div class="card">
+<h2><span class="pill before">BEFORE</span> Folder for one file</h2>
+<div class="tree"><span class="dim">council-output/</span>
+  question-<span class="warn">20261014T1516</span>/
+    synthesis.md <span class="dim">← folder exists only to hold this</span></div>
+<p class="mut">One directory per run, even when it contained a single <code>synthesis.md</code>. Noisy listings, extra clicks, awkward globs.</p>
+</div>
+<div class="card">
+<h2><span class="pill after">AFTER</span> Single file, same naming</h2>
+<div class="tree"><span class="dim">council-output/</span>
+  <span class="hl">question-synthesis-20261014T1516.md</span> <span class="dim">← directly usable</span></div>
+<p class="mut">Format: <code>&lt;slug&gt;-synthesis-&lt;YYYYMMDDThhmm&gt;.md</code>, e.g. <code>some-good-question-here-is-synthesis-20261014T1451.md</code>. Collisions get <code>-2</code>, <code>-3</code> suffixes.</p>
+</div>
+</div>
+
+<div class="card" style="margin-top:16px">
+<h2>Decision flow — <code>save_markdown_artifacts()</code></h2>
+<div class="flow" role="list">
+<div class="step" role="listitem"><b>1 · Collect</b><span><code>_expected_markdown_files()</code> → {prompt.md?, initial-*.md?, synthesis.md?}</span></div>
+<div class="arrow" aria-hidden="true">→</div>
+<div class="step" role="listitem"><b>2 · Test</b><span><code>_is_synthesis_only()</code> — is the set exactly <code>{"synthesis.md"}</code>?</span></div>
+<div class="arrow" aria-hidden="true">→</div>
+<div class="step" role="listitem"><b>3a · YES → file</b><span><code>_save_single_synthesis_file()</code>: temp file + atomic rename under <code>markdown_dir</code></span></div>
+<div class="arrow" aria-hidden="true">→</div>
+<div class="step" role="listitem"><b>3b · NO → folder</b><span>staging dir + atomic rename to <code>&lt;slug&gt;-&lt;stamp&gt;/</code></span></div>
+</div>
+<div class="callout ok"><b>Content is identical</b> <span class="mut">— the single file holds exactly what <code>synthesis.md</code> held (header, requested/actual model, synthesis text). Only the path changes, so <code>markdown_path</code> may now be a file (<code>is_file()</code>) or a folder (<code>is_dir()</code>).</span></div>
+<svg viewBox="0 0 900 190" role="img" aria-label="Branching diagram from expected files to single file or folder">
+<defs><marker id="ah" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto"><path d="M0,0 L8,4 L0,8" fill="none" stroke="#5cc8ff" stroke-width="1.6"/></marker></defs>
+<rect x="10" y="60" width="200" height="70" rx="10" fill="#1f2a3a" stroke="#2b3a4f"/><text x="24" y="88" fill="#e8eef6" font-size="13" font-weight="700">expected_files</text><text x="24" y="108" fill="#9fb0c3" font-size="12">dict of .md → content</text>
+<rect x="270" y="60" width="200" height="70" rx="10" fill="#1f2a3a" stroke="#5cc8ff"/><text x="284" y="88" fill="#e8eef6" font-size="13" font-weight="700">only synthesis.md?</text><text x="284" y="108" fill="#9fb0c3" font-size="12">set == {"synthesis.md"}</text>
+<rect x="540" y="15" width="330" height="70" rx="10" fill="#0f2c1f" stroke="#5fe3a1"/><text x="554" y="42" fill="#5fe3a1" font-size="13" font-weight="700">YES → council-output/&lt;slug&gt;-synthesis-&lt;ts&gt;.md</text><text x="554" y="62" fill="#9fb0c3" font-size="12">atomic temp-file + rename, -2/-3 on collision</text>
+<rect x="540" y="100" width="330" height="70" rx="10" fill="#2c2410" stroke="#ffd479"/><text x="554" y="127" fill="#ffd479" font-size="13" font-weight="700">NO → council-output/&lt;slug&gt;-&lt;ts&gt;/</text><text x="554" y="147" fill="#9fb0c3" font-size="12">prompt.md · initial-*.md · synthesis.md</text>
+<line x1="210" y1="95" x2="262" y2="95" stroke="#5cc8ff" stroke-width="1.6" marker-end="url(#ah)"/>
+<line x1="470" y1="95" x2="530" y2="50" stroke="#5fe3a1" stroke-width="1.6" marker-end="url(#ah)"/>
+<line x1="470" y1="95" x2="530" y2="135" stroke="#ffd479" stroke-width="1.6" marker-end="url(#ah)"/>
+</svg>
+</div>
+
+<div class="card" style="margin-top:16px">
+<h2>Concrete examples</h2>
+<div class="tabs" role="tablist" aria-label="Output examples">
+<button class="tab" role="tab" aria-selected="true" data-t="t1">Synthesis-only</button>
+<button class="tab" role="tab" aria-selected="false" data-t="t2">Full run</button>
+<button class="tab" role="tab" aria-selected="false" data-t="t3">Export</button>
+</div>
+<div id="t1" role="tabpanel"><h3>Env: <code>SAVE_PROMPT=none</code>, <code>SAVE_INITIAL_ANSWERS=none</code>, <code>SAVE_SYNTHESIS=markdown</code></h3>
+<div class="tree"><span class="dim">council-output/</span>
+  <span class="hl">some-good-question-here-is-synthesis-20261014T1451.md</span>
+
+<span class="dim"># inside:</span>
+# Synthesis
+
+- Requested model: `test/alpha:free`
+- Answering model: `test/alpha:free`
+
+Synthesized fixture answer …</div></div>
+<div id="t2" role="tabpanel" hidden><h3>Env: prompt + initials + synthesis as markdown</h3>
+<div class="tree"><span class="dim">council-output/</span>
+  quick-brown-fox-jumps-over-lazy-20261014T1516/
+    prompt.md
+    initial-001-test-alpha-free.md
+    initial-002-test-beta-free.md
+    synthesis.md</div></div>
+<div id="t3" role="tabpanel" hidden><h3><code>--export-markdown</code> backfill</h3>
+<div class="tree"><span class="dim"># DuckDB-only run → export writes the same layout, idempotently.</span>
+export #1 → <span class="hl">council-run-synthesis-20261014T1517.md</span> <span class="dim">(prompt was NULL → slug falls back)</span>
+export #2 → <span class="dim">() — skipped, identical content already present</span></div></div>
+</div>
+
+<div class="grid cols2" style="margin-top:16px">
+<div class="card">
+<h2>Failure map (new troubleshooting guide)</h2>
+<table>
+<tr><th>Symptom</th><th>Cause → fix</th></tr>
+<tr><td><code>402</code>, no retry</td><td>Insufficient credits → top up. Only <code>in_flight_budget</code> 402s retry.</td></tr>
+<tr><td><code>429/503</code> + <code>Retry-After</code></td><td>Retried to <code>MAX_RETRY_WAIT</code>; lower concurrency / raise interval.</td></tr>
+<tr><td><code>403</code> one model</td><td>Harness-only → add to <code>EXCLUDED_MODELS</code>.</td></tr>
+<tr><td><code>Judge X failed… with Y</code></td><td>Normal fallback; check <code>judge</code> vs <code>judge_requested</code>.</td></tr>
+<tr><td>No Markdown output</td><td>Synthesis itself failed, or save modes off / <code>--no-save</code>.</td></tr>
+</table>
+<p class="mut">Full guide: <code>docs/operations/troubleshooting.md</code></p>
+</div>
+<div class="card">
+<h2>What shipped</h2>
+<h3>Commit <code>a0fc68e</code> on <code>improvements-and-refinements</code></h3>
+<div class="tree">Document troubleshooting and
+synthesis-only Markdown recipe
+
+ <span class="hl">docs/operations/troubleshooting.md</span>  <span class="dim">new · 70 lines</span>
+ <span class="hl">.env.example</span>  <span class="dim">+6 · commented recipe</span></div>
+<div class="callout"><b>Left uncommitted on purpose:</b> <span class="mut"><code>README.md</code> tree examples + <code>src/*</code> / <code>tests/*</code> share hunks with other uncommitted work — staging them would capture changes not made here.</span></div>
+<p class="mut">Validation: <code>ruff check .</code> clean · full suite earlier 269 passed · single-file + folder + export-idempotency manually verified.</p>
+</div>
+</div>
+
+<footer>Self-contained file · no external dependencies · respects <code>prefers-reduced-motion</code>. Source: this thread's workspace. Uncertainty: exact slug stop-word filtering can surprise (e.g. “is” is dropped); the example filename in the request is illustrative, not a literal slug.</footer>
+</div>
+<script>
+document.querySelectorAll('button.tab').forEach(b=>b.addEventListener('click',()=>{
+document.querySelectorAll('button.tab').forEach(x=>x.setAttribute('aria-selected','false'));
+b.setAttribute('aria-selected','true');
+['t1','t2','t3'].forEach(id=>document.getElementById(id).hidden=id!==b.dataset.t);
+}));
+</script>
+</body>
+</html>

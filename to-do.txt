@@ -20,6 +20,12 @@ e.g. uv run llm-council --followup "provide more details about that last securit
 2. JUDGE_SYSTEM Prompt should not live in a .py file, but in an external .txt or .md file, referenced by JUDGE_PROMPT=path/to/prompt.md
 (Current JUDGE_SYSTEM in council.py can be retained as default/backup).
 3. Never hardcode any Model IDs - but you can recommend adding them to .env
- ---
 
 When calling llm_council.query, `judge_prompt=path` to be exposed as optional parameter.
+
+1. Resolve following issue (which may have appeared after second subsequent --followup I issued):
+OpenRouter error 400: Provider returned error; {"metadata":
+         {"raw": "{\"error\":{\"message\":\"Conversation roles must alternate user/assistant/user/assistant/...\",\"type\":\"BadRequestError\",\"param\":null,\"code\":400}}", "provider_name":
+         "Nvidia", "is_byok": false, "provider_error_code": "400"}}
+
+2. I have SAVE_SYNTHESIS=BOTH and MARKDOWN_DIR=council-output in .env, but I don't see any synthesis markdown files there. Everything seems to work and appear on command line, but with these settings, I expect to see markdown files in that folder as well.

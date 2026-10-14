@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import time
+from collections.abc import Sequence
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Any
@@ -94,6 +95,36 @@ def _read_prompt(
     return text, source_path
 
 
+def _prior_messages(
+    previous_synthesis: str | None = None,
+    prior_turns: Sequence[tuple[str, str]] | None = None,
+) -> list[dict[str, str]]:
+    """Build alternating user/assistant messages for follow-up conversations."""
+    if prior_turns is not None:
+        if not isinstance(prior_turns, (list, tuple)) or any(
+            not isinstance(turn, (list, tuple))
+            or len(turn) != 2
+            or any(not isinstance(part, str) or not part.strip() for part in turn)
+            for turn in prior_turns
+        ):
+            raise ConfigurationError(
+                "prior_turns must be a sequence of non-empty (user, assistant) string pairs."
+            )
+        messages: list[dict[str, str]] = []
+        for user_prompt, assistant_reply in prior_turns:
+            messages.append({"role": "user", "content": user_prompt})
+            messages.append({"role": "assistant", "content": assistant_reply})
+        return messages
+    if previous_synthesis is not None:
+        if not isinstance(previous_synthesis, str) or not previous_synthesis.strip():
+            raise ConfigurationError("previous_synthesis must be a non-empty string.")
+        return [
+            {"role": "user", "content": "Previous question"},
+            {"role": "assistant", "content": previous_synthesis},
+        ]
+    return []
+
+
 def query_result(
     prompt: str | Path | None = None,
     *,
@@ -109,6 +140,7 @@ def query_result(
     env_file: str | Path | None = None,
     settings: Settings | None = None,
     previous_synthesis: str | None = None,
+    prior_turns: Sequence[tuple[str, str]] | None = None,
     **overrides: Any,
 ) -> CouncilResult:
     """Run a council and return text, model identities, errors, usage, and storage location.
@@ -121,6 +153,7 @@ def query_result(
     If both prompt and file are provided, file text precedes the literal prompt.
     """
     text, source_path = _read_prompt(prompt, file, literal_prompt)
+    history = _prior_messages(previous_synthesis, prior_turns)
     config = settings if settings is not None else Settings.from_env(env_file)
     config = config.with_overrides(
         **overrides,
@@ -157,10 +190,7 @@ def query_result(
                 model_id = model["id"]
                 logger.debug("Querying council member %s", model_id)
                 try:
-                    messages = []
-                    if previous_synthesis is not None:
-                        messages.append({"role": "assistant", "content": previous_synthesis})
-                    messages.append({"role": "user", "content": text})
+                    messages = [*history, {"role": "user", "content": text}]
                     answer = client.complete(model_id, messages, free_only=True)
                     logger.info("Received answer from %s", answer.model)
                     return answer
@@ -219,14 +249,11 @@ def query_result(
             for candidate, candidate_free in judge_candidates:
                 logger.info("Synthesizing %d valid answers with %s", len(successful), candidate)
                 try:
-                    messages = [{"role": "system", "content": judge_system}]
-                    if previous_synthesis is not None:
-                        messages.append({"role": "assistant", "content": previous_synthesis})
-                    messages.extend(
-                        [
-                            {"role": "user", "content": judge_input},
-                        ]
-                    )
+                    messages = [
+                        {"role": "system", "content": judge_system},
+                        *history,
+                        {"role": "user", "content": judge_input},
+                    ]
                     synthesis = client.complete(candidate, messages, free_only=candidate_free)
                     used_judge = candidate
                     break
@@ -246,9 +273,7 @@ def query_result(
                 ) from last_judge_error
             storage.save_answer(synthesis, "synthesis")
             assert synthesis.content is not None
-            markdown_failed = bool(failures) or last_judge_error is not None
-            if not markdown_failed:
-                storage.save_markdown_artifacts(text, tuple(answers), synthesis)
+            storage.save_markdown_artifacts(text, tuple(answers), synthesis)
             logger.info(
                 "%s synthesized %d responses in %s:",
                 _short_model_name(synthesis.model),

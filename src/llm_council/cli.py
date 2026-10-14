@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 import shutil
 import subprocess
 import sys
@@ -14,9 +15,10 @@ from rich.console import Console
 from rich.markdown import Markdown
 
 from .config import LOG_LEVELS
-from .council import query
+from .council import _read_prompt, query
 from .errors import ConfigurationError, CouncilError
 from .judges import STRATEGIES
+from .storage import export_markdown
 
 
 def parser() -> argparse.ArgumentParser:
@@ -30,6 +32,11 @@ def parser() -> argparse.ArgumentParser:
     result.set_defaults(followup_prompt=None)
     result.add_argument(
         "--followup", dest="followup_prompt", help="Ask a follow-up using the latest synthesis"
+    )
+    result.add_argument(
+        "--export-markdown",
+        action="store_true",
+        help="Export stored DuckDB runs with syntheses into Markdown folders and exit",
     )
     result.add_argument("--copy", action="store_true", help="Copy the synthesis to the clipboard")
     result.add_argument("--env-file", help="Settings file (default: .env in the current directory)")
@@ -71,6 +78,39 @@ def _latest_synthesis_path() -> Path:
     return Path.cwd() / ".llm-council" / "latest-synthesis.md"
 
 
+def _latest_history_path() -> Path:
+    return Path.cwd() / ".llm-council" / "latest-conversation.json"
+
+
+def _load_latest_conversation() -> tuple[tuple[str, str], ...]:
+    synthesis = _load_latest_synthesis()
+    history_path = _latest_history_path()
+    if history_path.is_file():
+        try:
+            payload = json.loads(history_path.read_text(encoding="utf-8"))
+        except (OSError, UnicodeError, ValueError) as exc:
+            raise ConfigurationError(
+                f"Cannot read cached conversation {history_path}: {exc}"
+            ) from exc
+        if (
+            isinstance(payload, list)
+            and payload
+            and all(
+                isinstance(turn, list)
+                and len(turn) == 2
+                and all(isinstance(part, str) and part.strip() for part in turn)
+                for turn in payload
+            )
+        ):
+            if payload[-1][1] == synthesis:
+                return tuple((turn[0], turn[1]) for turn in payload)
+            return (("Previous question", synthesis),)
+        raise ConfigurationError(
+            f"Cached conversation {history_path} is invalid; run a new query first."
+        )
+    return (("Previous question", synthesis),)
+
+
 def _load_latest_synthesis() -> str:
     path = _latest_synthesis_path()
     try:
@@ -86,20 +126,34 @@ def _load_latest_synthesis() -> str:
     return synthesis
 
 
-def _cache_latest_synthesis(synthesis: str) -> None:
-    path = _latest_synthesis_path()
+def _atomic_write_text(path: Path, content: str, prefix: str) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     temporary_path: Path | None = None
     try:
         with tempfile.NamedTemporaryFile(
-            mode="w", encoding="utf-8", dir=path.parent, prefix=".latest-", delete=False
+            mode="w", encoding="utf-8", dir=path.parent, prefix=prefix, delete=False
         ) as temporary:
-            temporary.write(synthesis)
+            temporary.write(content)
             temporary_path = Path(temporary.name)
         temporary_path.replace(path)
     finally:
         if temporary_path is not None:
             temporary_path.unlink(missing_ok=True)
+
+
+def _cache_latest_synthesis(
+    synthesis: str, conversation: Sequence[tuple[str, str]] | None = None
+) -> None:
+    _atomic_write_text(_latest_synthesis_path(), synthesis, ".latest-")
+    history_path = _latest_history_path()
+    if conversation is not None:
+        _atomic_write_text(
+            history_path,
+            json.dumps([[user, assistant] for user, assistant in conversation], ensure_ascii=False),
+            ".history-",
+        )
+    else:
+        history_path.unlink(missing_ok=True)
 
 
 def _copy_to_clipboard(synthesis: str) -> None:
@@ -129,21 +183,42 @@ def main(argv: Sequence[str] | None = None) -> int:
     arg_parser = parser()
     args = arg_parser.parse_args(argv)
     followup_prompt = args.followup_prompt
+    should_export = args.export_markdown
+    if should_export and (
+        followup_prompt is not None
+        or args.file is not None
+        or args.prompt is not None
+        or args.no_save
+    ):
+        arg_parser.error(
+            "--export-markdown cannot be combined with --question, --file, --followup, or --no-save"
+        )
     if followup_prompt is not None and (args.file is not None or args.prompt is not None):
         arg_parser.error("--followup cannot be combined with --question or --file")
-    if followup_prompt is None and args.file is None and args.prompt is None:
+    if not should_export and followup_prompt is None and args.file is None and args.prompt is None:
         arg_parser.error("provide --question, --file, or both")
     try:
         options = vars(args)
         options.pop("followup_prompt")
+        options.pop("export_markdown")
         should_copy = options.pop("copy")
-        previous_synthesis = _load_latest_synthesis() if followup_prompt is not None else None
+        if should_export:
+            options.pop("prompt")
+            options.pop("file")
+            options.pop("no_save")
+            folders = export_markdown(**options)
+            for folder in folders:
+                print(folder)
+            return 0
+        prior_turns = _load_latest_conversation() if followup_prompt is not None else ()
+        previous_synthesis = prior_turns[-1][1] if prior_turns else None
         if followup_prompt is not None:
             options["prompt"] = followup_prompt
         answer = query(
             **options,
             literal_prompt=args.file is None and followup_prompt is None,
             previous_synthesis=previous_synthesis,
+            prior_turns=prior_turns or None,
         )
     except CouncilError as exc:
         print(f"llm-council: {exc}", file=sys.stderr)
@@ -155,7 +230,12 @@ def main(argv: Sequence[str] | None = None) -> int:
     Console().print(Markdown(answer), markup=False)
     try:
         if not args.no_save:
-            _cache_latest_synthesis(answer)
+            current_prompt = (
+                followup_prompt
+                if followup_prompt is not None
+                else _read_prompt(args.prompt, args.file, literal_prompt=args.file is None)[0]
+            )
+            _cache_latest_synthesis(answer, (*prior_turns, (current_prompt, answer)))
         if should_copy:
             _copy_to_clipboard(answer)
     except (OSError, CouncilError) as exc:

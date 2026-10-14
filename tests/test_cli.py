@@ -89,13 +89,84 @@ def test_cli_followup_uses_cached_synthesis_in_messages(cli_env, router, tmp_pat
     )
     assert followup.returncode == 0, followup.stderr
     assert router.calls[0]["messages"] == [
+        {"role": "user", "content": "Original question"},
         {"role": "assistant", "content": previous},
         {"role": "user", "content": "Clarify the previous answer"},
     ]
     judge_call = next(call for call in router.calls if call["messages"][0]["role"] == "system")
-    assert judge_call["messages"][1] == {"role": "assistant", "content": previous}
-    assert judge_call["messages"][2]["role"] == "user"
+    assert judge_call["messages"][1:3] == [
+        {"role": "user", "content": "Original question"},
+        {"role": "assistant", "content": previous},
+    ]
+    assert judge_call["messages"][3]["role"] == "user"
     assert cache.read_text(encoding="utf-8") == previous
+
+
+def test_cli_subsequent_followups_preserve_alternating_roles(cli_env, router, tmp_path):
+    """Chained --followup calls keep user/assistant/user/assistant/... role alternation."""
+    assert run_cli(["-q", "First question"], tmp_path, cli_env).returncode == 0
+    router.reply = {
+        "model": "test/beta:free",
+        "choices": [{"message": {"content": "Second synthesis"}, "finish_reason": "stop"}],
+    }
+    assert run_cli(["--followup", "First followup"], tmp_path, cli_env).returncode == 0
+
+    router.calls.clear()
+    router.reply = {
+        "model": "test/beta:free",
+        "choices": [{"message": {"content": "Third synthesis"}, "finish_reason": "stop"}],
+    }
+    second_followup = run_cli(["--followup", "Second followup"], tmp_path, cli_env)
+    assert second_followup.returncode == 0, second_followup.stderr
+    assert router.calls[0]["messages"] == [
+        {"role": "user", "content": "First question"},
+        {"role": "assistant", "content": "Synthesized fixture answer"},
+        {"role": "user", "content": "First followup"},
+        {"role": "assistant", "content": "Second synthesis"},
+        {"role": "user", "content": "Second followup"},
+    ]
+    judge_call = next(call for call in router.calls if call["messages"][0]["role"] == "system")
+    assert [msg["role"] for msg in judge_call["messages"]] == [
+        "system",
+        "user",
+        "assistant",
+        "user",
+        "assistant",
+        "user",
+    ]
+
+
+def test_cli_followup_with_legacy_synthesis_cache_only_alternates_roles(cli_env, router, tmp_path):
+    """A workspace with only latest-synthesis.md still sends alternating user/assistant roles."""
+    cache_dir = tmp_path / ".llm-council"
+    cache_dir.mkdir()
+    (cache_dir / "latest-synthesis.md").write_text("Legacy synthesis", encoding="utf-8")
+    result = run_cli(["--followup", "Followup question", "--no-save"], tmp_path, cli_env)
+    assert result.returncode == 0, result.stderr
+    assert [msg["role"] for msg in router.calls[0]["messages"]] == ["user", "assistant", "user"]
+    assert router.calls[0]["messages"][1] == {"role": "assistant", "content": "Legacy synthesis"}
+    judge_call = next(call for call in router.calls if call["messages"][0]["role"] == "system")
+    assert [msg["role"] for msg in judge_call["messages"]] == [
+        "system",
+        "user",
+        "assistant",
+        "user",
+    ]
+
+
+def test_cli_followup_prefers_edited_latest_synthesis_over_stale_history(cli_env, router, tmp_path):
+    """Editing latest-synthesis.md invalidates stale latest-conversation.json history."""
+    assert run_cli(["-q", "First question"], tmp_path, cli_env).returncode == 0
+    cache = tmp_path / ".llm-council" / "latest-synthesis.md"
+    cache.write_text("Manually edited synthesis", encoding="utf-8")
+    router.calls.clear()
+    followup = run_cli(["--followup", "Clarify edited text", "--no-save"], tmp_path, cli_env)
+    assert followup.returncode == 0, followup.stderr
+    assert router.calls[0]["messages"] == [
+        {"role": "user", "content": "Previous question"},
+        {"role": "assistant", "content": "Manually edited synthesis"},
+        {"role": "user", "content": "Clarify edited text"},
+    ]
 
 
 def test_followup_without_cache_fails_before_model_requests(cli_env, router, tmp_path):
@@ -184,15 +255,19 @@ def test_cli_env_log_level_and_flag_override(cli_env, tmp_path):
     assert "Synthesized fixture answer" in result.stdout
 
 
-def test_cli_partial_failure_suppresses_all_markdown_artifacts(cli_env, router, tmp_path):
+def test_cli_partial_failure_still_saves_requested_markdown_artifacts(cli_env, router, tmp_path):
     router.fail_models.add("test/alpha:free")
     cli_env["SAVE_PROMPT"] = "MARKDOWN"
     cli_env["SAVE_INITIAL_ANSWERS"] = "MARKDOWN"
-    cli_env["SAVE_SYNTHESIS"] = "MARKDOWN"
+    cli_env["SAVE_SYNTHESIS"] = "BOTH"
     result = run_cli(["-q", "Question"], tmp_path, cli_env)
     assert result.returncode == 0, result.stderr
     assert "Synthesized fixture answer" in result.stdout
-    assert not (tmp_path / "council-output").exists()
+    folders = list((tmp_path / "council-output").iterdir())
+    assert len(folders) == 1
+    files = {path.name for path in folders[0].iterdir()}
+    assert files == {"prompt.md", "initial-002-test-beta-free.md", "synthesis.md"}
+    assert "Synthesized fixture answer" in (folders[0] / "synthesis.md").read_text(encoding="utf-8")
 
 
 def test_cli_all_models_fail_without_markdown_artifacts(cli_env, router, tmp_path):
@@ -367,6 +442,8 @@ def test_cli_env_file(cli_env, tmp_path):
     [
         [],
         ["--question", "x", "--followup", "y"],
+        ["--question", "x", "--export-markdown"],
+        ["--export-markdown", "--no-save"],
         ["-q", "x", "--save-synthesis", "invalid"],
     ],
 )
@@ -374,6 +451,27 @@ def test_cli_invalid_usage(cli_env, router, tmp_path, args):
     result = run_cli(args, tmp_path, cli_env)
     assert result.returncode == 2
     assert not router.calls
+
+
+def test_cli_export_markdown_backfills_stored_duckdb_runs(cli_env, router, tmp_path):
+    """--export-markdown exports stored DuckDB syntheses without making API requests."""
+    run_result = run_cli(
+        ["-q", "Exported question", "--save-synthesis", "duckdb"],
+        tmp_path,
+        cli_env,
+    )
+    assert run_result.returncode == 0, run_result.stderr
+    assert not (tmp_path / "council-output").exists()
+    router.calls.clear()
+    router.gets.clear()
+
+    export_result = run_cli(["--export-markdown"], tmp_path, cli_env)
+    assert export_result.returncode == 0, export_result.stderr
+    assert not router.calls and not router.gets
+    folders = list((tmp_path / "council-output").iterdir())
+    assert len(folders) == 1
+    assert (folders[0] / "synthesis.md").is_file()
+    assert str(folders[0].name) in export_result.stdout
 
 
 def test_cli_missing_question_and_file_is_usage_error(cli_env, router, tmp_path):

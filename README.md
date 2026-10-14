@@ -59,7 +59,7 @@ for failure in result.failures:
 
 `query()` returns `str`. `query_result()` returns `CouncilResult` with the original
 prompt, initial `ModelAnswer` records (including failures), synthesized text, requested
-and actual judge IDs, usage, question ID, and optional Markdown folder. `ModelAnswer`
+and actual judge IDs, usage, question ID, and optional Markdown folder or single synthesis file. `ModelAnswer`
 contains `requested_model`, actual `model`, `content`, `error`, and `usage`.
 
 Both functions accept `Path` input, `env_file`, a `Settings` object, and overrides for
@@ -80,6 +80,7 @@ uv run llm-council -q "Compare Bayesian and frequentist inference" --judge large
   --save-prompt both --save-initial-answers both --save-synthesis both
 uv run llm-council -q "Explain entropy" --no-save
 uv run llm-council --followup "provide more details about that last security caveat" --copy
+uv run llm-council --export-markdown
 uv run llm-council -q "Explain entropy" --judge auto --judge-scope all
 python -m llm_council --help
 ```
@@ -92,12 +93,17 @@ Progress logs and errors/warnings go
 to stderr. Errors exit with status 1; invalid CLI usage exits with status 2. `--no-save`
 disables **all persistence**, even if other save flags or `.env` request it.
 `SAVE_PROMPT=NONE` only disables prompt content, not response saving. Each normal CLI run
-caches its latest synthesis in `.llm-council/latest-synthesis.md` for `--followup`; this is
+caches its latest synthesis in `.llm-council/latest-synthesis.md` (along with the alternating
+user/assistant turn history in `.llm-council/latest-conversation.json`) for `--followup`; this is
 separate from DuckDB/Markdown saving. `--no-save` suppresses updating that cache. A follow-up
-requires an existing cached synthesis, adds it as prior assistant context before the new
-follow-up prompt, and then starts a normal council run. `--copy` copies the exact synthesis
+requires an existing cached synthesis, replays the prior user/assistant conversation turns before
+the new follow-up prompt so roles strictly alternate `user`/`assistant`, and then starts a normal
+council run. `--copy` copies the exact synthesis
 to the system clipboard (using `clip` on Windows, `pbcopy` on macOS, or `wl-copy`, `xclip`,
-or `xsel` on Linux); it reports an error if no supported utility is available.
+or `xsel` on Linux); it reports an error if no supported utility is available. `--export-markdown`
+(or `llm_council.export_markdown()`) backfills stored DuckDB runs with non-empty syntheses into
+`MARKDOWN_DIR` folders (or single synthesis files) without repeating API calls, skipping runs whose synthesis folder/file already
+exists. See [troubleshooting](docs/operations/troubleshooting.md) for quota, exclusion, and missing-Markdown cases.
 
 ## Configuration
 
@@ -217,11 +223,13 @@ FROM questions q JOIN responses r ON r.question_id = q.id
 ORDER BY q.created_at, r.created_at;
 ```
 
-### Markdown: one directory per prompt run
+### Markdown: one directory per prompt run (single file for synthesis-only)
 
-On a fully successful run, only requested artifacts with actual non-empty response content
-are created, all inside the same folder. If any member or judge attempt errors, **no
-Markdown folder or files are created** (DuckDB error records can still be saved):
+Whenever synthesis succeeds, requested artifacts with actual non-empty response content
+are created, all inside the same folder. Failed individual member or fallback-judge calls are
+omitted from the folder (their error records can still be saved in DuckDB); if synthesis itself
+fails (every member fails, or the judge and all fallbacks fail), **no Markdown folder or files are
+created**:
 
 ```text
 council-output/<first-six-prompt-words>-<YYYYMMDDThhmm>/
@@ -231,13 +239,38 @@ council-output/<first-six-prompt-words>-<YYYYMMDDThhmm>/
   synthesis.md                       # if SAVE_SYNTHESIS includes MARKDOWN
 ```
 
+When synthesis.md is the only Markdown file requested (no prompt.md or initial answers),
+no subfolder is created. The synthesis is written directly under council-output using
+the same slug/timestamp naming with an md extension:
+
+```text
+council-output/<first-six-prompt-words>-synthesis-<YYYYMMDDThhmm>.md
+```
+
+Examples:
+
+```text
+# Full run (prompt + initials + synthesis)
+council-output/
+  quick-brown-fox-jumps-over-lazy-20261014T1516/
+    prompt.md
+    initial-001-test-alpha-free.md
+    initial-002-test-beta-free.md
+    synthesis.md
+
+# Synthesis-only run (SAVE_PROMPT=none, SAVE_INITIAL_ANSWERS=none, SAVE_SYNTHESIS=markdown)
+council-output/
+  some-good-question-here-is-synthesis-20261014T1451.md
+```
+
 Filenames are sanitized and prefixed with an index to avoid collisions. Folder names
 use up to the first six meaningful prompt words (common articles/prepositions are
-omitted) and a UTC minute timestamp; a numeric suffix disambiguates collisions.
+omitted) and a UTC minute timestamp; a numeric suffix disambiguates collisions. The
+single-file synthesis name uses the same slug and timestamp with a -synthesis- marker
+(e.g. council-output/some-good-question-here-is-synthesis-20261014T1451.md).
 Original prompt text is preserved. Response files record requested and actual model
-identities. Markdown artifacts are written only for non-empty response content. Any
-model or judge error suppresses the entire Markdown run output. Unrequested categories
-are omitted. No Markdown directory is made when saving is off.
+identities. Markdown artifacts are written only for non-empty response content. Unrequested
+categories are omitted. No Markdown directory is made when saving is off or when synthesis fails.
 
 If a model selected as judge already failed as a council member, synthesis tries a
 model that succeeded during the same run instead. If the selected judge fails its own

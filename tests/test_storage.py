@@ -4,7 +4,7 @@ from pathlib import Path
 import duckdb
 import pytest
 
-from llm_council import ModelAnswer, SaveMode, Settings, StorageError
+from llm_council import ModelAnswer, SaveMode, Settings, StorageError, export_markdown
 from llm_council.storage import RunStorage
 
 
@@ -49,8 +49,15 @@ def test_every_save_mode_combination(tmp_path, prompt_mode, initial_mode, synthe
         storage.save_markdown_artifacts("Question π", (answer,), answer)
         assert storage.folder is not None
         assert settings.markdown_dir.exists()
-        assert {path.name for path in storage.folder.iterdir()} == expected
-        assert storage.folder.name.startswith("question-")
+        if expected == {"synthesis.md"}:
+            assert storage.folder.is_file()
+            assert storage.folder.parent == settings.markdown_dir
+            assert storage.folder.name.startswith("question-synthesis-")
+            assert storage.folder.suffix == ".md"
+            assert "Answer" in storage.folder.read_text(encoding="utf-8")
+        else:
+            assert {path.name for path in storage.folder.iterdir()} == expected
+            assert storage.folder.name.startswith("question-")
     else:
         assert folder is None
         assert not settings.markdown_dir.exists()
@@ -77,3 +84,57 @@ def test_markdown_write_failure_is_not_swallowed(tmp_path, monkeypatch):
         answer = ModelAnswer("test/model", "test/model", content="Actual answer")
         with pytest.raises(StorageError, match="Cannot save Markdown artifacts"):
             storage.save_markdown_artifacts("Question", (answer,), answer)
+
+
+def test_export_markdown_writes_stored_duckdb_runs_idempotently(tmp_path):
+    """export_markdown backfills DuckDB-only runs into Markdown folders without duplicates."""
+    settings = Settings().with_overrides(
+        save_prompt="duckdb",
+        save_initial_answers="duckdb",
+        save_synthesis="duckdb",
+        duckdb_path=tmp_path / "data.duckdb",
+        markdown_dir=tmp_path / "markdown",
+    )
+    initial = ModelAnswer("test/alpha:free", "test/alpha:free", content="Initial answer")
+    failed = ModelAnswer("test/beta:free", "test/beta:free", error="429 rate limited")
+    synthesis = ModelAnswer("test/alpha:free", "test/alpha:free", content="Synthesized answer")
+    with RunStorage(settings, "q1", "Explain normal distribution") as storage:
+        storage.save_question("Explain normal distribution", None)
+        storage.save_answer(initial, "initial", 1)
+        storage.save_answer(failed, "initial", 2)
+        storage.save_answer(synthesis, "synthesis")
+
+    exported = export_markdown(settings=settings)
+    assert len(exported) == 1
+    assert exported[0].parent == settings.markdown_dir
+    assert {path.name for path in exported[0].iterdir()} == {
+        "prompt.md",
+        "initial-001-test-alpha-free.md",
+        "synthesis.md",
+    }
+    assert "Synthesized answer" in (exported[0] / "synthesis.md").read_text(encoding="utf-8")
+    # Re-running export_markdown skips already exported runs.
+    assert export_markdown(settings=settings) == ()
+
+
+def test_export_markdown_respects_null_prompt_privacy_and_stage_modes(tmp_path):
+    """Runs saved without a prompt do not create an empty prompt.md on export."""
+    settings = Settings().with_overrides(
+        save_prompt="none",
+        save_initial_answers="duckdb",
+        save_synthesis="duckdb",
+        duckdb_path=tmp_path / "data.duckdb",
+        markdown_dir=tmp_path / "markdown",
+    )
+    synthesis = ModelAnswer("test/alpha:free", "test/alpha:free", content="Private synthesis")
+    with RunStorage(settings, "q-private", "") as storage:
+        storage.save_question("Should not be saved", None)
+        storage.save_answer(synthesis, "synthesis")
+
+    exported = export_markdown(settings=settings, save_prompt="markdown", save_synthesis="markdown")
+    assert len(exported) == 1
+    assert exported[0].is_file()
+    assert exported[0].parent == settings.markdown_dir
+    assert exported[0].name.startswith("council-run-synthesis-")
+    assert exported[0].suffix == ".md"
+    assert "Private synthesis" in exported[0].read_text(encoding="utf-8")
