@@ -11,6 +11,7 @@ import webbrowser
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+from threading import Event
 from typing import Any
 from urllib.parse import urlparse
 
@@ -494,6 +495,25 @@ _UI_HTML = r"""<!doctype html>
   .btn-secondary:hover:not(:disabled) {
     background: var(--bg-hover);
     border-color: var(--accent);
+  }
+
+  .btn-danger {
+    background: var(--red-soft);
+    color: var(--red);
+    border-color: rgba(248, 81, 73, 0.55);
+  }
+
+  .btn-danger:hover:not(:disabled) {
+    background: rgba(248, 81, 73, 0.26);
+    border-color: var(--red);
+    color: #ff948f;
+  }
+
+  .btn-danger:disabled {
+    background: var(--bg-elev);
+    color: var(--text-dim);
+    border-color: var(--border);
+    opacity: 0.5;
   }
 
   /* Rich hover tooltips for <New> and <Followup> */
@@ -1008,6 +1028,23 @@ _UI_HTML = r"""<!doctype html>
 
         <div class="controls-right">
           <button
+            id="clear-btn"
+            type="button"
+            class="btn btn-secondary"
+            data-tooltip="Clear the prompt textbox so you can type a fresh question."
+          >
+            ✕ Clear
+          </button>
+          <button
+            id="stop-btn"
+            type="button"
+            class="btn btn-danger"
+            disabled
+            data-tooltip="Stop / Abort the active LLM retrieval in progress."
+          >
+            ■ Stop
+          </button>
+          <button
             id="followup-btn"
             type="button"
             class="btn btn-followup"
@@ -1053,6 +1090,7 @@ _UI_HTML = r"""<!doctype html>
     selectedRunId: null,
     attachedFile: null, // { name, content }
     isRunning: false,
+    activeAbortController: null,
     activePage: "synthesis", // "synthesis" | "all" | number (0-based answer index)
     filterText: "",
   };
@@ -1063,6 +1101,8 @@ _UI_HTML = r"""<!doctype html>
   const attachmentRow = document.getElementById("attachment-row");
   const judgeSelect = document.getElementById("judge-select");
   const judgeCustomInput = document.getElementById("judge-custom-input");
+  const clearBtn = document.getElementById("clear-btn");
+  const stopBtn = document.getElementById("stop-btn");
   const newBtn = document.getElementById("new-btn");
   const followupBtn = document.getElementById("followup-btn");
   const improveBtn = document.getElementById("improve-btn");
@@ -1245,6 +1285,7 @@ _UI_HTML = r"""<!doctype html>
     const selected = findRunById(state.selectedRunId);
     const canFollowup = Boolean(selected && selected.synthesis && !state.isRunning);
     followupBtn.disabled = !canFollowup;
+    stopBtn.disabled = !state.isRunning;
 
     if (selected && selected.synthesis) {
       const snippet = (selected.prompt || "Selected run").slice(0, 44);
@@ -1657,8 +1698,11 @@ _UI_HTML = r"""<!doctype html>
     state.sessionRuns.unshift(newRun);
     state.selectedRunId = tempId;
     state.activePage = "all";
+    const abortController = new AbortController();
+    state.activeAbortController = abortController;
     state.isRunning = true;
     newBtn.disabled = true;
+    stopBtn.disabled = false;
     updateFollowupButtonState();
     renderHistorySidebar();
     renderWorkspace();
@@ -1686,6 +1730,7 @@ _UI_HTML = r"""<!doctype html>
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(payload),
+        signal: abortController.signal,
       });
 
       if (!response.ok || !response.body) {
@@ -1725,12 +1770,20 @@ _UI_HTML = r"""<!doctype html>
         }
       }
     } catch (err) {
-      newRun.error = err && err.message ? err.message : String(err);
+      if (err && err.name === "AbortError") {
+        newRun.error = "Stopped by user.";
+      } else {
+        newRun.error = err && err.message ? err.message : String(err);
+      }
       newRun.running = false;
     } finally {
       newRun.running = false;
+      if (state.activeAbortController === abortController) {
+        state.activeAbortController = null;
+      }
       state.isRunning = false;
       newBtn.disabled = false;
+      stopBtn.disabled = true;
       updateFollowupButtonState();
       renderHistorySidebar();
       renderWorkspace();
@@ -1780,12 +1833,19 @@ _UI_HTML = r"""<!doctype html>
   }
 
   async function requestPromptImprovements() {
+    if (state.isRunning) return;
     const rawPrompt = promptInput.value.trim();
     if (!rawPrompt && !state.attachedFile) {
       promptInput.focus();
       return;
     }
+    const abortController = new AbortController();
+    state.activeAbortController = abortController;
+    state.isRunning = true;
     improveBtn.disabled = true;
+    newBtn.disabled = true;
+    stopBtn.disabled = false;
+    updateFollowupButtonState();
     improveDrawer.classList.add("open");
     improveHeaderTitle.textContent = "Generating improved prompt versions with a single LLM…";
     improveOptions.innerHTML = "";
@@ -1800,6 +1860,7 @@ _UI_HTML = r"""<!doctype html>
           file_content: state.attachedFile ? state.attachedFile.content : null,
           judge: getSelectedJudgeValue(),
         }),
+        signal: abortController.signal,
       });
       const data = await resp.json();
       if (!resp.ok || data.error) {
@@ -1820,9 +1881,20 @@ _UI_HTML = r"""<!doctype html>
         });
       });
     } catch (err) {
-      improveHeaderTitle.textContent = "Prompt improvement error: " + (err.message || String(err));
+      if (err && err.name === "AbortError") {
+        improveHeaderTitle.textContent = "Prompt improvement stopped by user.";
+      } else {
+        improveHeaderTitle.textContent = "Prompt improvement error: " + (err.message || String(err));
+      }
     } finally {
+      if (state.activeAbortController === abortController) {
+        state.activeAbortController = null;
+      }
+      state.isRunning = false;
       improveBtn.disabled = false;
+      newBtn.disabled = false;
+      stopBtn.disabled = true;
+      updateFollowupButtonState();
     }
   }
 
@@ -1882,6 +1954,17 @@ _UI_HTML = r"""<!doctype html>
       renderAttachmentChip();
     };
     reader.readAsText(file);
+  });
+
+  clearBtn.addEventListener("click", function() {
+    promptInput.value = "";
+    promptInput.focus();
+  });
+
+  stopBtn.addEventListener("click", function() {
+    if (state.activeAbortController) {
+      state.activeAbortController.abort();
+    }
   });
 
   newBtn.addEventListener("click", function() {
@@ -2079,12 +2162,15 @@ def create_web_server(
                 self.send_header("Connection", "close")
                 self.end_headers()
 
+                cancel_event = Event()
+
                 def send_sse(event_payload: dict[str, Any]) -> None:
                     try:
                         line = f"data: {json.dumps(event_payload)}\n\n".encode()
                         self.wfile.write(line)
                         self.wfile.flush()
                     except OSError as write_exc:
+                        cancel_event.set()
                         logger.debug("SSE client disconnected: %s", write_exc)
 
                 try:
@@ -2100,13 +2186,16 @@ def create_web_server(
                         ),
                         prior_turns=prior_turns,
                         on_event=send_sse,
+                        cancel_event=cancel_event,
                     )
                 except CouncilError as exc:
-                    logger.warning("Council web query error: %s", exc)
-                    send_sse({"type": "error", "error": str(exc)})
+                    if not cancel_event.is_set():
+                        logger.warning("Council web query error: %s", exc)
+                        send_sse({"type": "error", "error": str(exc)})
                 except Exception as exc:
-                    logger.error("Unexpected council web query failure: %s", exc)
-                    send_sse({"type": "error", "error": f"Unexpected error: {exc}"})
+                    if not cancel_event.is_set():
+                        logger.error("Unexpected council web query failure: %s", exc)
+                        send_sse({"type": "error", "error": f"Unexpected error: {exc}"})
                 return
 
             self._send_json({"error": "Not found"}, status=HTTPStatus.NOT_FOUND)

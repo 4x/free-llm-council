@@ -8,6 +8,7 @@ import time
 from collections.abc import Callable, Sequence
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
+from threading import Event
 from typing import Any
 from uuid import uuid4
 
@@ -194,6 +195,7 @@ def query_result(
     previous_synthesis: str | None = None,
     prior_turns: Sequence[tuple[str, str]] | None = None,
     on_event: Callable[[dict[str, Any]], None] | None = None,
+    cancel_event: Event | None = None,
     **overrides: Any,
 ) -> CouncilResult:
     """Run a council and return text, model identities, errors, usage, and storage location.
@@ -251,6 +253,12 @@ def query_result(
 
             def ask(model: dict[str, Any]) -> ModelAnswer:
                 model_id = model["id"]
+                if cancel_event is not None and cancel_event.is_set():
+                    return ModelAnswer(
+                        requested_model=model_id,
+                        model=model_id,
+                        error="Aborted by user.",
+                    )
                 logger.debug("Querying council member %s", model_id)
                 try:
                     messages = [*history, {"role": "user", "content": text}]
@@ -264,6 +272,8 @@ def query_result(
             answers: list[ModelAnswer] = []
             with ThreadPoolExecutor(max_workers=config.max_concurrency) as executor:
                 for index, answer in enumerate(executor.map(ask, members), 1):
+                    if cancel_event is not None and cancel_event.is_set():
+                        raise CouncilError("Council run aborted.")
                     answers.append(answer)
                     storage.save_answer(answer, "initial", index)
                     if on_event is not None:
@@ -279,6 +289,8 @@ def query_result(
                                 "usage": answer.usage,
                             }
                         )
+            if cancel_event is not None and cancel_event.is_set():
+                raise CouncilError("Council run aborted.")
             successful = [
                 answer
                 for answer in answers
@@ -323,6 +335,8 @@ def query_result(
             synthesis: ModelAnswer | None = None
             used_judge = judge_model
             for candidate, candidate_free in judge_candidates:
+                if cancel_event is not None and cancel_event.is_set():
+                    raise CouncilError("Council run aborted.")
                 logger.info("Synthesizing %d valid answers with %s", len(successful), candidate)
                 if on_event is not None:
                     on_event(

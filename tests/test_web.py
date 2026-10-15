@@ -4,12 +4,13 @@ from __future__ import annotations
 
 import json
 import threading
+from threading import Event
 from urllib.error import HTTPError
 from urllib.request import Request, urlopen
 
 import pytest
 
-from llm_council import create_web_server, load_history, query_result
+from llm_council import CouncilError, create_web_server, load_history, query_result
 
 
 @pytest.fixture()
@@ -52,6 +53,9 @@ def test_web_index_serves_required_ui_elements(web_url):
         html = resp.read().decode("utf-8")
 
     assert 'id="prompt-input"' in html
+    assert 'id="clear-btn"' in html
+    assert 'id="stop-btn"' in html
+    assert "btn-danger" in html
     assert 'id="new-btn"' in html
     assert 'id="followup-btn"' in html
     assert "data-tooltip=" in html
@@ -191,3 +195,20 @@ def test_web_empty_query_returns_400(web_url):
 def test_load_history_returns_empty_when_db_missing(config):
     """load_history returns an empty list when the DuckDB file does not exist yet."""
     assert load_history(settings=config) == []
+
+
+def test_query_result_respects_cancel_event(config, router):
+    """Setting cancel_event aborts in-progress council retrieval before synthesis."""
+    cancel = Event()
+
+    def stop_on_first_answer(evt: dict) -> None:
+        if evt.get("type") == "member_answer":
+            cancel.set()
+
+    with pytest.raises(CouncilError, match="aborted"):
+        query_result(
+            "Abort this council run",
+            settings=config.with_overrides(max_concurrency=1),
+            on_event=stop_on_first_answer,
+            cancel_event=cancel,
+        )
