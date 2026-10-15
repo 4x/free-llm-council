@@ -13,7 +13,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from threading import Event
 from typing import Any
-from urllib.parse import urlparse
+from urllib.parse import unquote, urlparse
 
 from .config import Settings
 from .council import improve_prompt, query_result
@@ -27,12 +27,30 @@ DEFAULT_WEB_HOST = "127.0.0.1"
 DEFAULT_WEB_PORT = 8765
 MAX_REQUEST_BYTES = 10 * 1024 * 1024
 
+# Vendored browser assets (KaTeX, used to typeset LaTeX in council answers).
+STATIC_DIR = Path(__file__).resolve().parent / "static"
+STATIC_URL_PREFIX = "/static/"
+STATIC_CONTENT_TYPES = {
+    ".css": "text/css; charset=utf-8",
+    ".js": "text/javascript; charset=utf-8",
+    ".mjs": "text/javascript; charset=utf-8",
+    ".json": "application/json; charset=utf-8",
+    ".svg": "image/svg+xml",
+    ".txt": "text/plain; charset=utf-8",
+    ".md": "text/markdown; charset=utf-8",
+    ".woff2": "font/woff2",
+    ".woff": "font/woff",
+    ".ttf": "font/ttf",
+}
+
 _UI_HTML = r"""<!doctype html>
 <html lang="en">
 <head>
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
 <title>llm-council — Interactive Workspace</title>
+<link rel="stylesheet" href="/static/katex/katex.min.css" />
+<script src="/static/katex/katex.min.js"></script>
 <style>
   :root {
     --bg: #0b0e14;
@@ -890,6 +908,26 @@ _UI_HTML = r"""<!doctype html>
     font-weight: 600;
   }
 
+  /* KaTeX typesetting: nudge the copy size up slightly and let wide
+     display equations scroll horizontally instead of overflowing. */
+  .markdown-body .katex {
+    font-size: 1.08em;
+  }
+
+  .math-display {
+    overflow-x: auto;
+    overflow-y: hidden;
+    padding: 2px 0;
+  }
+
+  .math-display .katex-display {
+    margin: 0.7em 0;
+  }
+
+  .math-raw {
+    color: var(--text-muted);
+  }
+
   .empty-workspace {
     margin: auto;
     max-width: 520px;
@@ -1129,23 +1167,101 @@ _UI_HTML = r"""<!doctype html>
       .replace(/"/g, "&quot;");
   }
 
+  // Private-use markers (NUL-delimited) that survive HTML escaping, so we can
+  // pull code spans and LaTeX out of the text before Markdown transforms run
+  // and splice the finished fragments back in afterwards.
+  const INLINE_CODE_TOKEN = "\u0000CODEINLINE_";
+  const INLINE_MATH_TOKEN = "\u0000MATHINLINE_";
+  const DISPLAY_MATH_TOKEN = "\u0000MATHDISPLAY_";
+  const ESCAPED_DOLLAR_TOKEN = "\u0000ESCDOLLAR\u0000";
+
+  function katexReady() {
+    return Boolean(window.katex) && typeof window.katex.renderToString === "function";
+  }
+
+  // Returns rendered HTML, or null when KaTeX is unavailable or the LaTeX is
+  // unusable, so callers can fall back to showing the literal source.
+  function renderMathToHtml(tex, displayMode) {
+    if (!katexReady()) return null;
+    try {
+      return window.katex.renderToString(tex, {
+        displayMode: Boolean(displayMode),
+        throwOnError: false,
+        strict: false,
+        trust: false,
+      });
+    } catch (_) {
+      return null;
+    }
+  }
+
+  // Replaces $...$ and \(...\) spans with tokens, pushing the raw LaTeX onto
+  // `store`. Delimiters must hug their content ($x$, not $ x $) and a closing
+  // $ followed by a digit is treated as currency, not math.
+  function protectInlineMath(text, store) {
+    let out = text.replace(/\\\(([\s\S]+?)\\\)/g, function(_, tex) {
+      store.push(tex);
+      return INLINE_MATH_TOKEN + (store.length - 1) + "\u0000";
+    });
+    out = out.replace(/\\\$/g, ESCAPED_DOLLAR_TOKEN);
+    out = out.replace(/\$(?![\s$])([^$\n]*?[^\s$])\$(?!\d)/g, function(_, tex) {
+      store.push(tex);
+      return INLINE_MATH_TOKEN + (store.length - 1) + "\u0000";
+    });
+    return out.split(ESCAPED_DOLLAR_TOKEN).join("$");
+  }
+
+  function restoreInlineMath(html, store) {
+    return html.replace(/\u0000MATHINLINE_(\d+)\u0000/g, function(_, idx) {
+      const tex = store[Number(idx)];
+      if (tex === undefined) return "";
+      const rendered = renderMathToHtml(tex, false);
+      if (rendered !== null) return rendered;
+      return '<code class="math-raw">' + escapeHtml("$" + tex + "$") + "</code>";
+    });
+  }
+
   function renderInlineMarkdown(text) {
-    let out = escapeHtml(text);
-    out = out.replace(/`([^`\n]+)`/g, "<code>$1</code>");
+    const codeStore = [];
+    const mathStore = [];
+    let out = String(text ?? "").replace(/`([^`\n]+)`/g, function(_, code) {
+      codeStore.push(code);
+      return INLINE_CODE_TOKEN + (codeStore.length - 1) + "\u0000";
+    });
+    out = protectInlineMath(out, mathStore);
+    out = escapeHtml(out);
     out = out.replace(/\*\*([^*]+)\*\*/g, "<strong>$1</strong>");
     out = out.replace(/\*([^*\n]+)\*/g, "<em>$1</em>");
     out = out.replace(/\[([^\]]+)\]\((https?:\/\/[^\s)]+)\)/g, '<a href="$2" target="_blank" rel="noopener noreferrer" style="color: var(--accent);">$1</a>');
-    return out;
+    out = out.replace(/\u0000CODEINLINE_(\d+)\u0000/g, function(_, idx) {
+      const code = codeStore[Number(idx)];
+      return code === undefined ? "" : "<code>" + escapeHtml(code) + "</code>";
+    });
+    return restoreInlineMath(out, mathStore);
   }
 
   function renderMarkdown(md) {
     if (!md) return "<p><em>No content available.</em></p>";
     const codeBlocks = [];
-    const fenced = String(md).replace(/```([a-zA-Z0-9_-]*)\n([\s\S]*?)```/g, function(_, lang, code) {
+    let fenced = String(md).replace(/```([a-zA-Z0-9_-]*)\n([\s\S]*?)```/g, function(_, lang, code) {
       const idx = codeBlocks.length;
       const label = lang ? '<div style="font-family:var(--mono);font-size:10.5px;color:var(--text-dim);margin-bottom:4px;">' + escapeHtml(lang) + '</div>' : '';
       codeBlocks.push('<pre>' + label + '<code>' + escapeHtml(code.replace(/\n$/, "")) + '</code></pre>');
       return "\u0000CODEBLOCK_" + idx + "\u0000";
+    });
+
+    // Block-level math can span lines, so claim it before the text is split
+    // into lines and isolate it on a line of its own.
+    const displayMath = [];
+    function claimDisplayMath(tex) {
+      displayMath.push(tex.trim());
+      return "\n" + DISPLAY_MATH_TOKEN + (displayMath.length - 1) + "\u0000\n";
+    }
+    fenced = fenced.replace(/\$\$([\s\S]+?)\$\$/g, function(_, tex) {
+      return claimDisplayMath(tex);
+    });
+    fenced = fenced.replace(/\\\[([\s\S]+?)\\\]/g, function(_, tex) {
+      return claimDisplayMath(tex);
     });
 
     const lines = fenced.split(/\r?\n/);
@@ -1216,6 +1332,19 @@ _UI_HTML = r"""<!doctype html>
       if (codeMatch) {
         closeLists();
         html.push(codeBlocks[Number(codeMatch[1])]);
+        continue;
+      }
+
+      const displayMathMatch = trimmed.match(/^\u0000MATHDISPLAY_(\d+)\u0000$/);
+      if (displayMathMatch) {
+        closeLists();
+        const tex = displayMath[Number(displayMathMatch[1])] || "";
+        const rendered = renderMathToHtml(tex, true);
+        html.push(
+          rendered !== null
+            ? '<div class="math-display">' + rendered + "</div>"
+            : '<div class="math-display"><pre><code class="math-raw">' + escapeHtml(tex) + "</code></pre></div>"
+        );
         continue;
       }
 
@@ -2064,8 +2193,36 @@ def create_web_server(
                 raise CouncilError("JSON request body must be an object.")
             return parsed
 
+        def _serve_static(self, url_path: str) -> None:
+            """Serve a vendored asset from STATIC_DIR, refusing any path escape."""
+            relative = unquote(url_path[len(STATIC_URL_PREFIX) :])
+            candidate = (STATIC_DIR / relative).resolve()
+            try:
+                candidate.relative_to(STATIC_DIR)
+            except ValueError:
+                logger.warning("Rejected static path escaping STATIC_DIR: %s", url_path)
+                self._send_json({"error": "Not found"}, status=HTTPStatus.NOT_FOUND)
+                return
+            if not candidate.is_file():
+                self._send_json({"error": "Not found"}, status=HTTPStatus.NOT_FOUND)
+                return
+            body = candidate.read_bytes()
+            content_type = STATIC_CONTENT_TYPES.get(
+                candidate.suffix.lower(), "application/octet-stream"
+            )
+            self.send_response(HTTPStatus.OK)
+            self.send_header("Content-Type", content_type)
+            self.send_header("Content-Length", str(len(body)))
+            self.send_header("Cache-Control", "no-store")
+            self.end_headers()
+            self.wfile.write(body)
+
         def do_GET(self) -> None:
             parsed_url = urlparse(self.path)
+            if parsed_url.path.startswith(STATIC_URL_PREFIX):
+                self._serve_static(parsed_url.path)
+                return
+
             if parsed_url.path in ("/", "/index.html"):
                 body = _UI_HTML.encode("utf-8")
                 self.send_response(HTTPStatus.OK)

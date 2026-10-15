@@ -104,7 +104,16 @@ the local HTML web interface.
 `uv run llm-council --web` starts a local HTTP/SSE workspace on `http://127.0.0.1:8765` with:
 - A prominent prompt composer with `<New>`, `<Followup>`, `<Clear>` (clears the prompt textbox), and red `<Stop>` (disabled/grayed out unless an active LLM retrieval is in progress) buttons with hover tooltips, a paperclip file attachment button (`📎 Attach file`), a Judge Criterion selector (all built-in strategies plus custom model slug), and a one-click `✨ Improve Prompt` drawer.
 - Real-time Server-Sent Events (SSE) streaming of council member answers as each model finishes, followed by the synthesized response and pagination pills (`Synthesis`, numbered member tabs, `Prev`/`Next`, and `All Answers`).
+- KaTeX typesetting of LaTeX in answers and syntheses. Inline `$...$` and `\(...\)` render inline; `$$...$$` and `\[...\]` render as centered display equations that scroll horizontally when they are wider than the card. Math inside fenced or inline code stays literal, as do currency amounts like `$5` and escaped `\$`.
 - Left-hand conversation history panel separating **Current Session** runs from **Saved in DuckDB** runs (rendered less prominently). Selecting any historical run populates its prompt and stored answers/synthesis (subject to availability), and clicking `<Followup>` while a conversation is selected follows up directly on that conversation.
+
+The KaTeX bundle that renders the LaTeX is **vendored, not fetched from a CDN**, so saved
+conversations keep rendering correctly with no network access. The assets live in
+`src/llm_council/static/katex/` and are served by the web server from `/static/` (it refuses
+any path that escapes `STATIC_DIR`). Only the `woff2` font format is vendored, because
+`katex.min.css` lists `woff2` first and every supported browser prefers it; see
+`src/llm_council/static/katex/FONTS.md`. The vendored copy is KaTeX 0.19.0 under the MIT
+license (`LICENSE` in the same directory).
 
 When `--file` is combined with `--question`, `--improve`, or `--prompt`, the
 UTF-8 file is read

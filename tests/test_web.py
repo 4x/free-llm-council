@@ -192,6 +192,42 @@ def test_web_empty_query_returns_400(web_url):
     assert exc_info.value.code == 400
 
 
+def test_web_index_references_vendored_katex(web_url):
+    """GET / wires up the locally vendored KaTeX bundle so LaTeX renders offline."""
+    with urlopen(f"{web_url}/", timeout=5) as resp:
+        html = resp.read().decode("utf-8")
+
+    assert 'href="/static/katex/katex.min.css"' in html
+    assert 'src="/static/katex/katex.min.js"' in html
+    # The KaTeX script must be a blocking head load: the inline app script
+    # renders history immediately and needs window.katex to already exist.
+    katex_tag = html[html.index('src="/static/katex/katex.min.js"') - 40 :]
+    assert "defer" not in katex_tag[:40]
+    assert "renderMathToHtml" in html
+    assert "math-display" in html
+
+
+def test_web_serves_vendored_katex_assets(web_url):
+    """GET /static serves the vendored KaTeX stylesheet, script, and woff2 fonts."""
+    for asset_path, expected_type in (
+        ("/static/katex/katex.min.css", "text/css"),
+        ("/static/katex/katex.min.js", "text/javascript"),
+        ("/static/katex/fonts/KaTeX_Main-Regular.woff2", "font/woff2"),
+    ):
+        with urlopen(f"{web_url}{asset_path}", timeout=5) as resp:
+            assert resp.status == 200, asset_path
+            assert expected_type in resp.headers.get("Content-Type", ""), asset_path
+            assert len(resp.read()) > 0, asset_path
+
+
+def test_web_static_rejects_paths_outside_static_dir(web_url):
+    """GET /static refuses traversal attempts instead of serving package sources."""
+    for hostile_path in ("/static/../web.py", "/static/%2e%2e%2fweb.py"):
+        with pytest.raises(HTTPError) as exc_info:
+            urlopen(f"{web_url}{hostile_path}", timeout=5)
+        assert exc_info.value.code == 404, hostile_path
+
+
 def test_load_history_returns_empty_when_db_missing(config):
     """load_history returns an empty list when the DuckDB file does not exist yet."""
     assert load_history(settings=config) == []
