@@ -588,3 +588,25 @@ def test_help_and_version_do_not_need_key(cli_env, tmp_path):
         result = run_cli([arg], tmp_path, cli_env)
         assert result.returncode == 0, result.stderr
         assert "llm-council" in result.stdout
+
+
+def test_cli_web_conflicts_with_question_flag(cli_env, tmp_path):
+    result = run_cli(["--web", "-q", "Question"], tmp_path, cli_env)
+    assert result.returncode == 2
+    assert "--web cannot be combined" in result.stderr
+
+
+def test_cli_web_invokes_serve_web(monkeypatch, tmp_path):
+    captured: dict[str, object] = {}
+
+    def fake_serve_web(**kwargs: object) -> None:
+        captured.update(kwargs)
+
+    monkeypatch.setattr("llm_council.cli.serve_web", fake_serve_web)
+    code = cli.main(["--web", "--port", "8910", "--judge", "largest-context", "--no-save"])
+    assert code == 0
+    assert captured["port"] == 8910
+    assert captured["judge"] == "largest-context"
+    assert captured["save_prompt"] == "none"
+    assert captured["save_initial_answers"] == "none"
+    assert captured["save_synthesis"] == "none"

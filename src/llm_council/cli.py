@@ -19,6 +19,7 @@ from .council import _read_prompt, improve_prompt, query
 from .errors import ConfigurationError, CouncilError
 from .judges import STRATEGIES
 from .storage import export_markdown
+from .web import DEFAULT_WEB_HOST, DEFAULT_WEB_PORT, serve_web
 
 
 def parser() -> argparse.ArgumentParser:
@@ -54,6 +55,24 @@ def parser() -> argparse.ArgumentParser:
         "--export-markdown",
         action="store_true",
         help="Export stored DuckDB runs with syntheses into Markdown folders and exit",
+    )
+    result.add_argument(
+        "--web",
+        "--serve",
+        dest="web",
+        action="store_true",
+        help="Start the interactive local HTML web interface",
+    )
+    result.add_argument(
+        "--host",
+        default=DEFAULT_WEB_HOST,
+        help=f"Bind host for --web (default: {DEFAULT_WEB_HOST})",
+    )
+    result.add_argument(
+        "--port",
+        type=int,
+        default=DEFAULT_WEB_PORT,
+        help=f"Bind port for --web (default: {DEFAULT_WEB_PORT})",
     )
     result.add_argument("--copy", action="store_true", help="Copy the synthesis to the clipboard")
     result.add_argument("--env-file", help="Settings file (default: .env in the current directory)")
@@ -239,8 +258,21 @@ def main(argv: Sequence[str] | None = None) -> int:
     args = arg_parser.parse_args(argv)
     followup_prompt = args.followup_prompt
     should_export = args.export_markdown
+    should_serve_web = args.web
     improve_arg = args.improve_prompt
     prompt_index = args.prompt_index
+    if should_serve_web and (
+        should_export
+        or followup_prompt is not None
+        or args.file is not None
+        or args.prompt is not None
+        or improve_arg is not None
+        or prompt_index is not None
+    ):
+        arg_parser.error(
+            "--web cannot be combined with --question, --file, --followup, "
+            "--improve, --prompt, or --export-markdown"
+        )
     if should_export and (
         followup_prompt is not None
         or args.file is not None
@@ -264,21 +296,35 @@ def main(argv: Sequence[str] | None = None) -> int:
     if improve_arg is not None and not improve_arg.strip() and args.file is None:
         arg_parser.error("provide a prompt to --improve, --file, or both")
     if (
-        not should_export
+        not should_serve_web
+        and not should_export
         and followup_prompt is None
         and improve_arg is None
         and prompt_index is None
         and args.file is None
         and args.prompt is None
     ):
-        arg_parser.error("provide --question, --file, --improve, or --prompt")
+        arg_parser.error("provide --question, --file, --improve, --prompt, or --web")
     try:
         options = vars(args)
         options.pop("followup_prompt")
         options.pop("export_markdown")
+        options.pop("web")
+        web_host = options.pop("host")
+        web_port = options.pop("port")
         options.pop("improve_prompt")
         options.pop("prompt_index")
         should_copy = options.pop("copy")
+        if should_serve_web:
+            options.pop("prompt")
+            options.pop("file")
+            no_save = bool(options.pop("no_save", False))
+            if no_save:
+                options["save_prompt"] = "none"
+                options["save_initial_answers"] = "none"
+                options["save_synthesis"] = "none"
+            serve_web(host=web_host, port=web_port, **options)
+            return 0
         if should_export:
             options.pop("prompt")
             options.pop("file")

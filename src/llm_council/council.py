@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 import re
 import time
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Any
@@ -193,6 +193,7 @@ def query_result(
     settings: Settings | None = None,
     previous_synthesis: str | None = None,
     prior_turns: Sequence[tuple[str, str]] | None = None,
+    on_event: Callable[[dict[str, Any]], None] | None = None,
     **overrides: Any,
 ) -> CouncilResult:
     """Run a council and return text, model identities, errors, usage, and storage location.
@@ -235,6 +236,16 @@ def query_result(
         # Validate the judge before sending any member requests or writing files.
         judge_model, judge_free = select_judge(config, catalog, client)
         logger.info("Discovered %d free models; judge: %s", len(members), judge_model)
+        if on_event is not None:
+            on_event(
+                {
+                    "type": "discovered",
+                    "question_id": question_id,
+                    "prompt": text,
+                    "models": [member["id"] for member in members],
+                    "judge": judge_model,
+                }
+            )
         with RunStorage(config, question_id, text) as storage:
             storage.save_question(text, source_path)
 
@@ -255,6 +266,19 @@ def query_result(
                 for index, answer in enumerate(executor.map(ask, members), 1):
                     answers.append(answer)
                     storage.save_answer(answer, "initial", index)
+                    if on_event is not None:
+                        on_event(
+                            {
+                                "type": "member_answer",
+                                "index": index,
+                                "total": len(members),
+                                "requested_model": answer.requested_model,
+                                "model": answer.model,
+                                "content": answer.content,
+                                "error": answer.error,
+                                "usage": answer.usage,
+                            }
+                        )
             successful = [
                 answer
                 for answer in answers
@@ -300,6 +324,14 @@ def query_result(
             used_judge = judge_model
             for candidate, candidate_free in judge_candidates:
                 logger.info("Synthesizing %d valid answers with %s", len(successful), candidate)
+                if on_event is not None:
+                    on_event(
+                        {
+                            "type": "synthesizing",
+                            "judge": candidate,
+                            "valid_count": len(successful),
+                        }
+                    )
                 try:
                     messages = [
                         {"role": "system", "content": judge_system},
@@ -326,13 +358,14 @@ def query_result(
             storage.save_answer(synthesis, "synthesis")
             assert synthesis.content is not None
             storage.save_markdown_artifacts(text, tuple(answers), synthesis)
+            elapsed_seconds = time.perf_counter() - started_at
             logger.info(
                 "%s synthesized %d responses in %s:",
                 _short_model_name(synthesis.model),
                 len(successful),
-                _format_elapsed(time.perf_counter() - started_at),
+                _format_elapsed(elapsed_seconds),
             )
-            return CouncilResult(
+            result = CouncilResult(
                 question_id=question_id,
                 prompt=text,
                 answers=tuple(answers),
@@ -342,6 +375,20 @@ def query_result(
                 synthesis_usage=synthesis.usage,
                 markdown_path=storage.folder,
             )
+            if on_event is not None:
+                on_event(
+                    {
+                        "type": "synthesis",
+                        "question_id": question_id,
+                        "judge": synthesis.model,
+                        "judge_requested": used_judge,
+                        "synthesis": synthesis.content,
+                        "usage": synthesis.usage,
+                        "elapsed": _format_elapsed(elapsed_seconds),
+                        "markdown_path": str(storage.folder) if storage.folder else None,
+                    }
+                )
+            return result
 
 
 def query(

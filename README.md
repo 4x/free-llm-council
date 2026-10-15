@@ -88,6 +88,7 @@ uv run llm-council -q "Compare Bayesian and frequentist inference" --judge large
 uv run llm-council -q "Explain entropy" --no-save
 uv run llm-council --followup "provide more details about that last security caveat" --copy
 uv run llm-council --export-markdown
+uv run llm-council --web --port 8765
 uv run llm-council -q "Explain entropy" --judge auto --judge-scope all
 python -m llm_council --help
 ```
@@ -95,7 +96,17 @@ python -m llm_council --help
 Supply `--question`, `--file`, or both, or use `--improve` / `--improve-prompt` (to ask one LLM
 for numbered improved versions of a prompt, cached in `.llm-council/improved-prompts.json` unless
 `--no-save` is passed) followed by `--prompt <n>` (1-based) to run the council with the `n`th
-improved prompt. When `--file` is combined with `--question`, `--improve`, or `--prompt`, the
+improved prompt, or pass `--web` / `--serve` (optionally with `--port`, default `8765`) to launch
+the local HTML web interface.
+
+### Web UI (`--web` / `--serve`)
+
+`uv run llm-council --web` starts a local HTTP/SSE workspace on `http://127.0.0.1:8765` with:
+- A prominent prompt composer with `<New>` and `<Followup>` buttons (with hover tooltips explaining context attachment), a paperclip file attachment button (`📎 Attach file`), a Judge Criterion selector (all built-in strategies plus custom model slug), and a one-click `✨ Improve Prompt` drawer.
+- Real-time Server-Sent Events (SSE) streaming of council member answers as each model finishes, followed by the synthesized response and pagination pills (`Synthesis`, numbered member tabs, `Prev`/`Next`, and `All Answers`).
+- Left-hand conversation history panel separating **Current Session** runs from **Saved in DuckDB** runs (rendered less prominently). Selecting any historical run populates its prompt and stored answers/synthesis (subject to availability), and clicking `<Followup>` while a conversation is selected follows up directly on that conversation.
+
+When `--file` is combined with `--question`, `--improve`, or `--prompt`, the
 UTF-8 file is read
 as context and the literal question is appended after it, separated by a blank line. The CLI
 **renders the synthesis as Markdown on stdout by default**, regardless of whether saving

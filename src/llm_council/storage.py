@@ -416,3 +416,92 @@ def export_markdown(
     except (duckdb.Error, OSError) as exc:
         raise StorageError(f"Cannot export Markdown artifacts from DuckDB: {exc}") from exc
     return tuple(exported)
+
+
+def load_history(
+    *,
+    env_file: str | Path | None = None,
+    settings: Settings | None = None,
+    limit: int = 100,
+    **overrides: Any,
+) -> list[dict[str, Any]]:
+    """Load persisted council runs from DuckDB ordered newest first."""
+    base = settings or Settings.from_env(env_file)
+    config = base.with_overrides(**overrides)
+    if not config.duckdb_path.is_file():
+        return []
+    try:
+        with duckdb.connect(str(config.duckdb_path), read_only=True) as connection:
+            tables = {row[0] for row in connection.execute("SHOW TABLES").fetchall()}
+            if "questions" not in tables:
+                return []
+            question_rows = connection.execute(
+                """
+                SELECT id, epoch(created_at), prompt, source_path
+                FROM questions
+                ORDER BY created_at DESC
+                LIMIT ?
+                """,
+                [limit],
+            ).fetchall()
+            has_responses = "responses" in tables
+            history: list[dict[str, Any]] = []
+            for question_id, created_ts, prompt, source_path in question_rows:
+                answers: list[dict[str, Any]] = []
+                synthesis: str | None = None
+                judge: str | None = None
+                judge_requested: str | None = None
+                synthesis_usage: dict[str, Any] = {}
+                if has_responses:
+                    response_rows = connection.execute(
+                        """
+                        SELECT stage, requested_model, model, content, error, usage
+                        FROM responses
+                        WHERE question_id = ?
+                        ORDER BY created_at ASC
+                        """,
+                        [question_id],
+                    ).fetchall()
+                    for stage, req_model, model_id, content, error, raw_usage in response_rows:
+                        parsed_usage: dict[str, Any] = {}
+                        if isinstance(raw_usage, str) and raw_usage:
+                            try:
+                                loaded = json.loads(raw_usage)
+                                if isinstance(loaded, dict):
+                                    parsed_usage = loaded
+                            except json.JSONDecodeError:
+                                parsed_usage = {}
+                        elif isinstance(raw_usage, dict):
+                            parsed_usage = raw_usage
+                        if stage == "initial":
+                            answers.append(
+                                {
+                                    "requested_model": req_model,
+                                    "model": model_id,
+                                    "content": content,
+                                    "error": error,
+                                    "usage": parsed_usage,
+                                }
+                            )
+                        elif stage == "synthesis" and content and content.strip():
+                            synthesis = content
+                            judge = model_id
+                            judge_requested = req_model
+                            synthesis_usage = parsed_usage
+                history.append(
+                    {
+                        "id": str(question_id),
+                        "created_at": float(created_ts) if created_ts is not None else 0.0,
+                        "prompt": prompt,
+                        "source_path": source_path,
+                        "answers": answers,
+                        "synthesis": synthesis,
+                        "judge": judge,
+                        "judge_requested": judge_requested,
+                        "synthesis_usage": synthesis_usage,
+                        "source": "db",
+                    }
+                )
+            return history
+    except (duckdb.Error, OSError) as exc:
+        raise StorageError(f"Cannot load history from DuckDB: {exc}") from exc
