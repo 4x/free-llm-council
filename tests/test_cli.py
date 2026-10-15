@@ -445,11 +445,105 @@ def test_cli_env_file(cli_env, tmp_path):
         ["--question", "x", "--export-markdown"],
         ["--export-markdown", "--no-save"],
         ["-q", "x", "--save-synthesis", "invalid"],
+        ["--improve"],
+        ["--improve", "x", "--question", "y"],
+        ["--improve", "x", "--followup", "y"],
+        ["--improve", "x", "--prompt", "1"],
+        ["--prompt", "1", "--question", "x"],
+        ["--prompt", "1", "--followup", "x"],
+        ["--export-markdown", "--improve", "x"],
+        ["--export-markdown", "--prompt", "1"],
     ],
 )
 def test_cli_invalid_usage(cli_env, router, tmp_path, args):
     result = run_cli(args, tmp_path, cli_env)
     assert result.returncode == 2
+    assert not router.calls
+
+
+@pytest.mark.parametrize("flag", ["--improve", "--improve-prompt"])
+def test_cli_improve_prompt_and_subsequent_prompt_index(cli_env, router, tmp_path, flag):
+    router.reply = {
+        "model": "test/beta:free",
+        "choices": [
+            {
+                "message": {
+                    "content": json.dumps(
+                        [
+                            "Improved alpha prompt",
+                            "Improved beta prompt",
+                            "Improved gamma prompt",
+                        ]
+                    )
+                },
+                "finish_reason": "stop",
+            }
+        ],
+    }
+    improve_res = run_cli([flag, "Rough question"], tmp_path, cli_env)
+    assert improve_res.returncode == 0, improve_res.stderr
+    assert "1. Improved alpha prompt" in improve_res.stdout
+    assert "2. Improved beta prompt" in improve_res.stdout
+    assert "3. Improved gamma prompt" in improve_res.stdout
+    assert len(router.calls) == 1
+    assert router.calls[0]["messages"][1]["content"] == "Rough question"
+    cache_file = tmp_path / ".llm-council" / "improved-prompts.json"
+    assert json.loads(cache_file.read_text(encoding="utf-8")) == [
+        "Improved alpha prompt",
+        "Improved beta prompt",
+        "Improved gamma prompt",
+    ]
+
+    router.calls.clear()
+    router.reply = None
+    run_res = run_cli(["--prompt", "2", "--no-save"], tmp_path, cli_env)
+    assert run_res.returncode == 0, run_res.stderr
+    assert "Synthesized fixture answer" in run_res.stdout
+    assert len(router.calls) == 3
+    assert router.calls[0]["messages"] == [{"role": "user", "content": "Improved beta prompt"}]
+    judge_call = next(call for call in router.calls if call["messages"][0]["role"] == "system")
+    assert json.loads(judge_call["messages"][1]["content"])["original_question"] == (
+        "Improved beta prompt"
+    )
+
+
+def test_cli_improve_with_file_only(cli_env, router, tmp_path):
+    (tmp_path / "draft.txt").write_text("File-based draft prompt", encoding="utf-8")
+    router.reply = {
+        "model": "test/beta:free",
+        "choices": [
+            {
+                "message": {"content": '["Refined file prompt 1", "Refined file prompt 2"]'},
+                "finish_reason": "stop",
+            }
+        ],
+    }
+    res = run_cli(["--file", "draft.txt", "--improve"], tmp_path, cli_env)
+    assert res.returncode == 0, res.stderr
+    assert "1. Refined file prompt 1" in res.stdout
+    assert "2. Refined file prompt 2" in res.stdout
+    assert len(router.calls) == 1
+    assert router.calls[0]["messages"][1]["content"] == "File-based draft prompt"
+
+
+def test_cli_prompt_index_errors_without_cache_or_out_of_range(cli_env, router, tmp_path):
+    no_cache = run_cli(["--prompt", "1"], tmp_path, cli_env)
+    assert no_cache.returncode == 1
+    assert "No improved prompts are cached" in no_cache.stderr
+    assert not router.calls
+
+    cache_dir = tmp_path / ".llm-council"
+    cache_dir.mkdir()
+    (cache_dir / "improved-prompts.json").write_text(
+        json.dumps(["Only one prompt"]), encoding="utf-8"
+    )
+    zero_idx = run_cli(["--prompt", "0"], tmp_path, cli_env)
+    assert zero_idx.returncode == 1
+    assert "at least 1" in zero_idx.stderr
+
+    out_of_range = run_cli(["--prompt", "2"], tmp_path, cli_env)
+    assert out_of_range.returncode == 1
+    assert "out of range" in out_of_range.stderr
     assert not router.calls
 
 

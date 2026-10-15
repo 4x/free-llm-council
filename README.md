@@ -26,10 +26,13 @@ The distribution/CLI name is `llm-council`; Python imports use `llm_council`
 ## Python
 
 ```python
-from llm_council import query, query_result
+from llm_council import improve_prompt, query, query_result
+
+# Ask a single LLM to rewrite a prompt into several improved versions:
+candidates = improve_prompt("Explain how beta distribution is related to Gaussian")
 
 synthesized_response1 = query(
-    prompt="Explain in depth how beta distribution is related to Gaussian",
+    prompt=candidates[0],
     save_initial_answers="both",
     judge="random",
 )
@@ -57,7 +60,9 @@ for failure in result.failures:
     print(failure.requested_model, failure.error)
 ```
 
-`query()` returns `str`. `query_result()` returns `CouncilResult` with the original
+`query()` returns `str`. `improve_prompt()` calls a single LLM (selected via the configured
+`judge` policy, falling back to other free models on error) and returns `tuple[str, ...]`
+of improved prompt versions. `query_result()` returns `CouncilResult` with the original
 prompt, initial `ModelAnswer` records (including failures), synthesized text, requested
 and actual judge IDs, usage, question ID, and optional Markdown folder or single synthesis file. `ModelAnswer`
 contains `requested_model`, actual `model`, `content`, `error`, and `usage`.
@@ -75,6 +80,8 @@ If every member fails, no judge is called.
 
 ```bash
 uv run llm-council --question "Explain the Riemann hypothesis" --save-initial-answers markdown
+uv run llm-council --improve "Explain the Riemann hypothesis"
+uv run llm-council --prompt 2
 uv run llm-council --file path/to/prompt.md --save-synthesis duckdb
 uv run llm-council -q "Compare Bayesian and frequentist inference" --judge largest-context \
   --save-prompt both --save-initial-answers both --save-synthesis both
@@ -85,7 +92,11 @@ uv run llm-council -q "Explain entropy" --judge auto --judge-scope all
 python -m llm_council --help
 ```
 
-Supply `--question`, `--file`, or both. When both are supplied, the UTF-8 file is read
+Supply `--question`, `--file`, or both, or use `--improve` / `--improve-prompt` (to ask one LLM
+for numbered improved versions of a prompt, cached in `.llm-council/improved-prompts.json` unless
+`--no-save` is passed) followed by `--prompt <n>` (1-based) to run the council with the `n`th
+improved prompt. When `--file` is combined with `--question`, `--improve`, or `--prompt`, the
+UTF-8 file is read
 as context and the literal question is appended after it, separated by a blank line. The CLI
 **renders the synthesis as Markdown on stdout by default**, regardless of whether saving
 is enabled; headings, lists, emphasis, and code blocks are formatted for terminal reading.

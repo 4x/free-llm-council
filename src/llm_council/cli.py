@@ -15,7 +15,7 @@ from rich.console import Console
 from rich.markdown import Markdown
 
 from .config import LOG_LEVELS
-from .council import _read_prompt, query
+from .council import _read_prompt, improve_prompt, query
 from .errors import ConfigurationError, CouncilError
 from .judges import STRATEGIES
 from .storage import export_markdown
@@ -29,6 +29,23 @@ def parser() -> argparse.ArgumentParser:
     )
     result.add_argument("--question", "-q", dest="prompt", help="Literal question text")
     result.add_argument("--file", "-f", help="UTF-8 context file; combines before --question")
+    result.add_argument(
+        "--improve",
+        "--improve-prompt",
+        dest="improve_prompt",
+        nargs="?",
+        const="",
+        default=None,
+        metavar="PROMPT",
+        help="Send a prompt to one LLM and display numbered improved versions",
+    )
+    result.add_argument(
+        "--prompt",
+        dest="prompt_index",
+        type=int,
+        metavar="N",
+        help="Send the Nth improved prompt from the latest --improve run",
+    )
     result.set_defaults(followup_prompt=None)
     result.add_argument(
         "--followup", dest="followup_prompt", help="Ask a follow-up using the latest synthesis"
@@ -80,6 +97,44 @@ def _latest_synthesis_path() -> Path:
 
 def _latest_history_path() -> Path:
     return Path.cwd() / ".llm-council" / "latest-conversation.json"
+
+
+def _improved_prompts_path() -> Path:
+    return Path.cwd() / ".llm-council" / "improved-prompts.json"
+
+
+def _cache_improved_prompts(prompts: Sequence[str]) -> None:
+    _atomic_write_text(
+        _improved_prompts_path(),
+        json.dumps(list(prompts), ensure_ascii=False, indent=2),
+        ".improved-",
+    )
+
+
+def _load_improved_prompt(index: int) -> str:
+    if index < 1:
+        raise ConfigurationError(f"--prompt index must be at least 1 (got {index}).")
+    path = _improved_prompts_path()
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except FileNotFoundError as exc:
+        raise ConfigurationError(
+            "No improved prompts are cached. Run with --improve or --improve-prompt first."
+        ) from exc
+    except (OSError, UnicodeError, ValueError) as exc:
+        raise ConfigurationError(f"Cannot read cached improved prompts {path}: {exc}") from exc
+    if (
+        not isinstance(payload, list)
+        or not payload
+        or any(not isinstance(item, str) or not item.strip() for item in payload)
+    ):
+        raise ConfigurationError(f"Cached improved prompts {path} is invalid; run --improve first.")
+    if index > len(payload):
+        raise ConfigurationError(
+            f"--prompt {index} is out of range; {len(payload)} improved "
+            f"prompt{'s are' if len(payload) != 1 else ' is'} cached (1-{len(payload)})."
+        )
+    return str(payload[index - 1])
 
 
 def _load_latest_conversation() -> tuple[tuple[str, str], ...]:
@@ -184,23 +239,45 @@ def main(argv: Sequence[str] | None = None) -> int:
     args = arg_parser.parse_args(argv)
     followup_prompt = args.followup_prompt
     should_export = args.export_markdown
+    improve_arg = args.improve_prompt
+    prompt_index = args.prompt_index
     if should_export and (
         followup_prompt is not None
         or args.file is not None
         or args.prompt is not None
+        or improve_arg is not None
+        or prompt_index is not None
         or args.no_save
     ):
         arg_parser.error(
-            "--export-markdown cannot be combined with --question, --file, --followup, or --no-save"
+            "--export-markdown cannot be combined with --question, --file, --followup, "
+            "--improve, --prompt, or --no-save"
         )
+    if improve_arg is not None and (
+        args.prompt is not None or followup_prompt is not None or prompt_index is not None
+    ):
+        arg_parser.error("--improve cannot be combined with --question, --followup, or --prompt")
+    if prompt_index is not None and (args.prompt is not None or followup_prompt is not None):
+        arg_parser.error("--prompt cannot be combined with --question or --followup")
     if followup_prompt is not None and (args.file is not None or args.prompt is not None):
         arg_parser.error("--followup cannot be combined with --question or --file")
-    if not should_export and followup_prompt is None and args.file is None and args.prompt is None:
-        arg_parser.error("provide --question, --file, or both")
+    if improve_arg is not None and not improve_arg.strip() and args.file is None:
+        arg_parser.error("provide a prompt to --improve, --file, or both")
+    if (
+        not should_export
+        and followup_prompt is None
+        and improve_arg is None
+        and prompt_index is None
+        and args.file is None
+        and args.prompt is None
+    ):
+        arg_parser.error("provide --question, --file, --improve, or --prompt")
     try:
         options = vars(args)
         options.pop("followup_prompt")
         options.pop("export_markdown")
+        options.pop("improve_prompt")
+        options.pop("prompt_index")
         should_copy = options.pop("copy")
         if should_export:
             options.pop("prompt")
@@ -210,10 +287,40 @@ def main(argv: Sequence[str] | None = None) -> int:
             for folder in folders:
                 print(folder)
             return 0
+        if improve_arg is not None:
+            no_save = bool(options.pop("no_save", False))
+            for unused in (
+                "save_prompt",
+                "save_initial_answers",
+                "save_synthesis",
+                "judge_prompt",
+                "duckdb_path",
+                "markdown_dir",
+            ):
+                options.pop(unused, None)
+            options["prompt"] = improve_arg if improve_arg.strip() else None
+            improved_versions = improve_prompt(
+                **options,
+                literal_prompt=args.file is None,
+            )
+            if not no_save:
+                _cache_improved_prompts(improved_versions)
+            formatted = "\n\n".join(
+                f"{idx}. {version}" for idx, version in enumerate(improved_versions, 1)
+            )
+            print(formatted)
+            if should_copy:
+                _copy_to_clipboard(formatted)
+            return 0
+        selected_prompt = (
+            _load_improved_prompt(prompt_index) if prompt_index is not None else args.prompt
+        )
         prior_turns = _load_latest_conversation() if followup_prompt is not None else ()
         previous_synthesis = prior_turns[-1][1] if prior_turns else None
         if followup_prompt is not None:
             options["prompt"] = followup_prompt
+        elif prompt_index is not None:
+            options["prompt"] = selected_prompt
         answer = query(
             **options,
             literal_prompt=args.file is None and followup_prompt is None,
@@ -233,7 +340,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             current_prompt = (
                 followup_prompt
                 if followup_prompt is not None
-                else _read_prompt(args.prompt, args.file, literal_prompt=args.file is None)[0]
+                else _read_prompt(selected_prompt, args.file, literal_prompt=args.file is None)[0]
             )
             _cache_latest_synthesis(answer, (*prior_turns, (current_prompt, answer)))
         if should_copy:

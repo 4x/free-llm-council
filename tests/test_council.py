@@ -7,7 +7,16 @@ import duckdb
 import pytest
 from conftest import model
 
-from llm_council import ConfigurationError, CouncilError, SaveMode, Settings, query, query_result
+from llm_council import (
+    ConfigurationError,
+    CouncilError,
+    SaveMode,
+    Settings,
+    improve_prompt,
+    query,
+    query_result,
+)
+from llm_council.council import _parse_improved_prompts
 from llm_council.models import council_models
 
 
@@ -419,3 +428,60 @@ def test_query_result_previous_synthesis_and_prior_turns_alternate_roles(config,
         "assistant",
         "user",
     ]
+
+
+@pytest.mark.parametrize(
+    ("raw", "expected"),
+    [
+        ('["First version", "Second version"]', ("First version", "Second version")),
+        (
+            '```json\n["Prompt A", "Prompt B", "Prompt C"]\n```',
+            ("Prompt A", "Prompt B", "Prompt C"),
+        ),
+        (
+            'Here are improved prompts:\n[{"prompt": "One"}, {"prompt": "Two"}]',
+            ("One", "Two"),
+        ),
+        (
+            "1. First numbered\n2. Second numbered\n3. Third numbered",
+            ("First numbered", "Second numbered", "Third numbered"),
+        ),
+        ("Single fallback prompt", ("Single fallback prompt",)),
+    ],
+)
+def test_parse_improved_prompts_formats(raw, expected):
+    assert _parse_improved_prompts(raw) == expected
+
+
+def test_improve_prompt_calls_single_model_and_falls_back_on_error(config, router):
+    router.reply = {
+        "model": "test/beta:free",
+        "choices": [
+            {
+                "message": {"content": '["Improved 1", "Improved 2", "Improved 3"]'},
+                "finish_reason": "stop",
+            }
+        ],
+    }
+    versions = improve_prompt("Draft question", settings=config)
+    assert versions == ("Improved 1", "Improved 2", "Improved 3")
+    assert len(router.calls) == 1
+    assert router.calls[0]["model"] == "test/beta:free"
+    assert router.calls[0]["messages"][1] == {"role": "user", "content": "Draft question"}
+    assert not config.duckdb_path.exists()
+    assert not config.markdown_dir.exists()
+
+    router.calls.clear()
+    router.fail_models.add("test/beta:free")
+    router.reply = {
+        "model": "test/alpha:free",
+        "choices": [
+            {
+                "message": {"content": '["Fallback 1", "Fallback 2"]'},
+                "finish_reason": "stop",
+            }
+        ],
+    }
+    fallback_versions = improve_prompt("Draft question", settings=config)
+    assert fallback_versions == ("Fallback 1", "Fallback 2")
+    assert [call["model"] for call in router.calls] == ["test/beta:free", "test/alpha:free"]
