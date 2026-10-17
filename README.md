@@ -346,7 +346,9 @@ apply the selected provider/model default; zero is invalid. The judge receives t
 original question plus **all successful answers in full**.
   Nothing is silently truncated. Huge councils may exceed the judge's context; use
   `largest-context`, a larger explicit judge, or shorter member output. Token-limit
-  truncation is treated as a failure; increase `MAX_TOKENS` when necessary.
+  truncation is treated as a failure, and the error separates reasoning tokens from
+  visible output: reasoning-dominated truncation suggests capping reasoning rather
+  than raising `MAX_TOKENS`.
 - Default request spacing targets fewer than 20 starts/minute; actual per-minute/daily
   free quotas depend on your key/account and other clients. A council consumes one
   request per free model, plus one judge request and retries.

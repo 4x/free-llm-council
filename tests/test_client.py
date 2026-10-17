@@ -395,6 +395,63 @@ def test_string_error_is_preserved(client):
         client.complete("model", [])
 
 
+@pytest.mark.parametrize(
+    ("usage", "content", "expected"),
+    [
+        (
+            {"completion_tokens": 2048, "completion_tokens_details": {"reasoning_tokens": 2048}},
+            "",
+            "reasoning used all 2048 completion tokens, leaving no room for the answer",
+        ),
+        (
+            {"completion_tokens": 2048, "completion_tokens_details": {"reasoning_tokens": 1900}},
+            "Partial",
+            "reasoning used 1900 of 2048 completion tokens, leaving 148 for the answer",
+        ),
+        (
+            {"completion_tokens": 2048, "completion_tokens_details": {"reasoning_tokens": 300}},
+            "",
+            "the answer used 1748 of 2048 completion tokens (300 went to reasoning)",
+        ),
+        (
+            {"completion_tokens": 2048, "completion_tokens_details": {"reasoning_tokens": 0}},
+            "",
+            "the answer used 2048 of 2048 completion tokens (no reasoning tokens)",
+        ),
+        ({}, "", "no reasoning-token accounting"),
+        (
+            {"completion_tokens": 2048, "completion_tokens_details": {"reasoning_tokens": "many"}},
+            "",
+            "no reasoning-token accounting",
+        ),
+    ],
+)
+def test_max_tokens_failure_distinguishes_reasoning_from_visible_output(
+    client, usage, content, expected
+):
+    """A truncated answer must say whether reasoning or visible output ate the budget."""
+    transport(
+        client,
+        lambda _: httpx.Response(
+            200,
+            json={
+                "choices": [{"message": {"content": content}, "finish_reason": "length"}],
+                "usage": usage,
+            },
+        ),
+    )
+    with pytest.raises(OpenRouterError) as caught:
+        client.complete("model", [])
+    text = str(caught.value)
+    assert "exhausted MAX_TOKENS: " in text
+    assert expected in text
+    reasoning_dominated = "reasoning used" in expected or "reasoning-token accounting" in expected
+    if reasoning_dominated:
+        assert "increase MAX_TOKENS to obtain a complete answer" not in text
+    if content:
+        assert "A partial answer was returned and discarded." in text
+
+
 def test_content_parts(client):
     payload = good()
     payload["choices"][0]["message"]["content"] = [

@@ -8,6 +8,17 @@ Operational failure modes for `llm-council`. Logs go to stderr; synthesis goes t
 - `402` is retried only when `error.metadata.limit_source` is `openrouter_in_flight_budget`. Other `402` (insufficient credits) fails immediately — top up credits, don't raise retries.
 - What to check: run with `--log-level debug` to see `Retry-After`, `limit_source`, and redacted provider metadata. Lower `MAX_CONCURRENCY` or raise `REQUEST_INTERVAL` (default `3` / `3.1s` targets <20 starts/min). Free quotas are account-wide.
 
+## Truncated answers: `exhausted MAX_TOKENS`
+
+Symptom: a member fails with `exhausted MAX_TOKENS: ...`. The suffix identifies what consumed the budget.
+
+- `reasoning used all N completion tokens` — the model spent the whole budget thinking. Raising `MAX_TOKENS` will not produce an answer; cap reasoning with `reasoning.max_tokens`/`reasoning.effort`, or drop the model (see [OpenRouter API capabilities](../reference/openrouter-api-capabilities.md)).
+- `reasoning used N of M completion tokens` — reasoning-dominated. Raising `MAX_TOKENS` mostly buys more reasoning, so cap it instead.
+- `the answer used N of M completion tokens` — genuine long answer. Increase `MAX_TOKENS`.
+- `no reasoning-token accounting` — the provider returned no `usage.completion_tokens_details`; the cause is unknown, so try raising `MAX_TOKENS` or capping reasoning.
+
+Raw per-answer usage (including `completion_tokens_details`) is persisted in DuckDB, so a truncated run can be inspected after the fact. Truncation is still a failure even when partial text was returned; the message notes when a partial answer was discarded.
+
 ## Harness-only / restricted models: 403
 
 Symptom: one model always fails with `403`, e.g. `thinkingmachines/inkling-small:free` returning harness-only.

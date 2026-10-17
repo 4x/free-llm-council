@@ -19,6 +19,55 @@ from .models import ModelAnswer, model_exclusion_reason
 
 logger = logging.getLogger(__name__)
 
+# Share of completion tokens spent on reasoning above which a truncated answer is
+# attributed to reasoning; below it, more budget mainly buys visible answer text.
+REASONING_DOMINATED_SHARE = 0.5
+
+
+def _token_count(value: Any) -> int | None:
+    """Return a non-negative integer token count, or None when unusable."""
+    if not isinstance(value, int) or isinstance(value, bool) or value < 0:
+        return None
+    return int(value)
+
+
+def _describe_length_stop(usage: Any, partial: bool) -> str:
+    """Explain a `length` stop by separating reasoning tokens from visible output.
+
+    OpenRouter counts reasoning tokens as completion tokens, so a truncation with
+    little or no visible output means reasoning consumed the budget, not that the
+    answer was long. Providers that omit the breakdown get an honest "unknown".
+    """
+    suffix = " A partial answer was returned and discarded." if partial else ""
+    usage = usage if isinstance(usage, dict) else {}
+    details = usage.get("completion_tokens_details")
+    details = details if isinstance(details, dict) else {}
+    completion = _token_count(usage.get("completion_tokens"))
+    reasoning = _token_count(details.get("reasoning_tokens"))
+    if completion is None or reasoning is None:
+        return (
+            "the provider reported no reasoning-token accounting, so the cause is "
+            "unknown; increase MAX_TOKENS or cap reasoning with reasoning.max_tokens." + suffix
+        )
+    visible = max(completion - reasoning, 0)
+    if completion and reasoning >= completion:
+        return (
+            f"reasoning used all {completion} completion tokens, leaving no room for the "
+            "answer; cap reasoning with reasoning.max_tokens or reasoning.effort, or "
+            "drop this model." + suffix
+        )
+    if completion and reasoning / completion >= REASONING_DOMINATED_SHARE:
+        return (
+            f"reasoning used {reasoning} of {completion} completion tokens, leaving "
+            f"{visible} for the answer; raising MAX_TOKENS mostly buys more reasoning, "
+            "so cap reasoning or drop this model." + suffix
+        )
+    reasoning_note = f" ({reasoning} went to reasoning)" if reasoning else " (no reasoning tokens)"
+    return (
+        f"the answer used {visible} of {completion} completion tokens{reasoning_note}; "
+        "increase MAX_TOKENS to obtain a complete answer." + suffix
+    )
+
 
 class OpenRouterClient:
     def __init__(self, settings: Settings) -> None:
@@ -226,10 +275,6 @@ class OpenRouterClient:
         if choice.get("error"):
             detail = self._error_detail(choice["error"])
             raise OpenRouterError(f"Model {model} returned a generation error: {detail}")
-        if choice.get("finish_reason") == "length":
-            raise OpenRouterError(
-                f"Model {model} exhausted MAX_TOKENS; increase it to obtain a complete answer."
-            )
         message = choice.get("message") or {}
         content = message.get("content") if isinstance(message, dict) else None
         if isinstance(content, list):
@@ -238,10 +283,15 @@ class OpenRouterClient:
                 for part in content
                 if isinstance(part, dict) and isinstance(part.get("text"), str)
             )
+        usage = payload.get("usage")
+        if choice.get("finish_reason") == "length":
+            partial = isinstance(content, str) and bool(content.strip())
+            raise OpenRouterError(
+                f"Model {model} exhausted MAX_TOKENS: {_describe_length_stop(usage, partial)}"
+            )
         if not isinstance(content, str) or not content.strip():
             raise OpenRouterError(f"Model {model} returned no text answer.")
         actual_model = payload.get("model")
-        usage = payload.get("usage")
         return ModelAnswer(
             requested_model=model,
             model=actual_model if isinstance(actual_model, str) else model,
