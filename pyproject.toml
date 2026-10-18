@@ -9,6 +9,7 @@ authors = [
 requires-python = ">=3.11"
 dependencies = [
     "duckdb>=1.1,<2",
+    "google-genai>=2.31.0",
     "httpx>=0.27,<1",
     "python-dotenv>=1,<2",
     "rich>=13,<15",
@@ -28,6 +29,10 @@ testpaths = ["tests"]
 python_version = "3.11"
 strict = true
 files = ["src/llm_council"]
+
+[[tool.mypy.overrides]]
+module = ["google.genai", "google.genai.*"]
+follow_imports = "silent"
 
 [tool.ruff]
 target-version = "py311"

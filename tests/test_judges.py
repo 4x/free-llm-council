@@ -169,3 +169,112 @@ def test_missing_intelligence_coverage_is_not_guessed(config, router):
     with pytest.raises(ConfigurationError, match="no intelligence-ranked"):
         query_result("Question", settings=config, judge="most-intelligent")
     assert not router.calls
+
+
+def test_gemini_model_selected_as_most_intelligent_and_called_via_gemini_api(
+    config, router, monkeypatch
+):
+    """OpenRouter's paid google/gemini-* ranking selects gemini-3.8-flash as judge,
+    while actual member and judge inference calls always go through the Gemini API."""
+    from types import SimpleNamespace
+
+    from conftest import model
+    from google.genai import types as genai_types
+
+    # google/gemini-3.8-flash is paid on OpenRouter, so free-only catalog queries hide it,
+    # but it is the #1 ranked model in OpenRouter's intelligence-high-to-low ranking.
+    gemini_or_entry = model("google/gemini-3.8-flash", price="0.002", context=2_000_000)
+    router.catalog.append(gemini_or_entry)
+    router.ranked = [gemini_or_entry, *router.ranked]
+
+    gemini_calls = []
+
+    class FakeModels:
+        def generate_content(self, *, model, contents, config=None):
+            gemini_calls.append({"model": model, "contents": contents, "config": config})
+            is_judge = bool(config and config.system_instruction)
+            text = "Gemini 3.8 Flash synthesis" if is_judge else f"Gemini member: {model}"
+            return SimpleNamespace(
+                candidates=[SimpleNamespace(finish_reason=genai_types.FinishReason.STOP)],
+                text=text,
+                model_version=model,
+                usage_metadata=None,
+            )
+
+    monkeypatch.setattr(
+        "google.genai.Client",
+        lambda **_kw: SimpleNamespace(models=FakeModels(), close=lambda: None),
+    )
+
+    result = query_result(
+        "Question",
+        settings=config.with_overrides(
+            gemini_api_key="gem-key",
+            gemini_models="gemini-3.6-flash,gemini-3.8-flash",
+            judge="most-intelligent",
+            judge_scope="free",
+        ),
+        no_save=True,
+    )
+    assert result.judge_requested == "gemini-3.8-flash"
+    assert result.judge == "gemini-3.8-flash"
+    assert result.synthesis == "Gemini 3.8 Flash synthesis"
+    # OpenRouter only received calls for its 2 free models, never for Gemini models
+    assert sorted(call["model"] for call in router.calls) == [
+        "test/alpha:free",
+        "test/beta:free",
+    ]
+    # Gemini API received the 2 member calls + 1 synthesis judge call
+    assert [call["model"] for call in gemini_calls] == [
+        "gemini-3.6-flash",
+        "gemini-3.8-flash",
+        "gemini-3.8-flash",
+    ]
+    assert gemini_calls[-1]["config"].system_instruction is not None
+
+
+def test_gemini_model_context_length_from_openrouter_selects_largest_context_judge(
+    config, router, monkeypatch
+):
+    """OpenRouter's catalog context_length for google/gemini-* is used by largest-context."""
+    from types import SimpleNamespace
+
+    from conftest import model
+    from google.genai import types as genai_types
+
+    # Make test/beta:free huge (1,500,000), and google/gemini-3.8-flash even larger (2,000,000)
+    router.catalog[1]["context_length"] = 1_500_000
+    router.catalog.append(model("google/gemini-3.8-flash", price="0.002", context=2_000_000))
+
+    gemini_calls = []
+
+    class FakeModels:
+        def generate_content(self, *, model, contents, config=None):
+            gemini_calls.append({"model": model, "config": config})
+            is_judge = bool(config and config.system_instruction)
+            return SimpleNamespace(
+                candidates=[SimpleNamespace(finish_reason=genai_types.FinishReason.STOP)],
+                text="Largest context synthesis" if is_judge else f"Answer {model}",
+                model_version=model,
+                usage_metadata=None,
+            )
+
+    monkeypatch.setattr(
+        "google.genai.Client",
+        lambda **_kw: SimpleNamespace(models=FakeModels(), close=lambda: None),
+    )
+
+    result = query_result(
+        "Question",
+        settings=config.with_overrides(
+            gemini_api_key="gem-key",
+            gemini_models="gemini-3.8-flash",
+            judge="largest-context",
+            judge_scope="free",
+        ),
+        no_save=True,
+    )
+    assert result.judge_requested == "gemini-3.8-flash"
+    assert result.synthesis == "Largest context synthesis"
+    assert all("gemini" not in call["model"] for call in router.calls)
+    assert [call["model"] for call in gemini_calls] == ["gemini-3.8-flash", "gemini-3.8-flash"]

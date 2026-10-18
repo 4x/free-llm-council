@@ -224,8 +224,12 @@ def query_result(
             save_prompt="none", save_initial_answers="none", save_synthesis="none"
         )
     logger = configure_logging(config.log_level)
-    if not config.api_key.strip():
+    if not config.api_key.strip() and not (config.gemini_api_key.strip() and config.gemini_models):
         raise ConfigurationError("Set OPENROUTER_API_KEY in .env or the environment.")
+    if config.gemini_models and not config.gemini_api_key.strip():
+        raise ConfigurationError(
+            "Set GEMINI_API_KEY in .env or the environment when GEMINI_MODELS is configured."
+        )
     judge_system = _read_judge_prompt(config.judge_prompt)
     question_id = str(uuid4())
     started_at = time.perf_counter()
@@ -439,8 +443,12 @@ def improve_prompt(
         judge_scope=judge_scope,
     )
     logger = configure_logging(config.log_level)
-    if not config.api_key.strip():
+    if not config.api_key.strip() and not (config.gemini_api_key.strip() and config.gemini_models):
         raise ConfigurationError("Set OPENROUTER_API_KEY in .env or the environment.")
+    if config.gemini_models and not config.gemini_api_key.strip():
+        raise ConfigurationError(
+            "Set GEMINI_API_KEY in .env or the environment when GEMINI_MODELS is configured."
+        )
     logger.info("Discovering models to improve prompt")
     with OpenRouterClient(config) as client:
         catalog = client.list_models()

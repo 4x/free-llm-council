@@ -51,6 +51,7 @@ _UI_HTML = r"""<!doctype html>
 <title>llm-council — Interactive Workspace</title>
 <link rel="stylesheet" href="/static/katex/katex.min.css" />
 <script src="/static/katex/katex.min.js"></script>
+<script src="/static/markdown_renderer.js"></script>
 <style>
   :root {
     --bg: #0b0e14;
@@ -928,6 +929,34 @@ _UI_HTML = r"""<!doctype html>
     color: var(--text-muted);
   }
 
+  /* Literal source kept beside a rendered document view, so a rewritten prompt can
+     always be compared against exactly what was stored. */
+  .raw-source {
+    margin-top: 12px;
+    border-top: 1px solid var(--border);
+    padding-top: 10px;
+  }
+
+  .raw-source summary {
+    cursor: pointer;
+    font-family: var(--mono);
+    font-size: 11.5px;
+    color: var(--text-muted);
+  }
+
+  .raw-source pre {
+    margin: 8px 0 0;
+    padding: 10px 12px;
+    background: #080b10;
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    overflow-x: auto;
+    white-space: pre-wrap;
+    word-break: break-word;
+    color: #d2dce8;
+    font-size: 12px;
+  }
+
   .empty-workspace {
     margin: auto;
     max-width: 520px;
@@ -1159,239 +1188,6 @@ _UI_HTML = r"""<!doctype html>
   const answersContainer = document.getElementById("answers-container");
   const activeContextPill = document.getElementById("active-context-pill");
 
-  function escapeHtml(str) {
-    return String(str ?? "")
-      .replace(/&/g, "&amp;")
-      .replace(/</g, "&lt;")
-      .replace(/>/g, "&gt;")
-      .replace(/"/g, "&quot;");
-  }
-
-  // Private-use markers (NUL-delimited) that survive HTML escaping, so we can
-  // pull code spans and LaTeX out of the text before Markdown transforms run
-  // and splice the finished fragments back in afterwards.
-  const INLINE_CODE_TOKEN = "\u0000CODEINLINE_";
-  const INLINE_MATH_TOKEN = "\u0000MATHINLINE_";
-  const DISPLAY_MATH_TOKEN = "\u0000MATHDISPLAY_";
-  const ESCAPED_DOLLAR_TOKEN = "\u0000ESCDOLLAR\u0000";
-
-  function katexReady() {
-    return Boolean(window.katex) && typeof window.katex.renderToString === "function";
-  }
-
-  // Returns rendered HTML, or null when KaTeX is unavailable or the LaTeX is
-  // unusable, so callers can fall back to showing the literal source.
-  function renderMathToHtml(tex, displayMode) {
-    if (!katexReady()) return null;
-    try {
-      return window.katex.renderToString(tex, {
-        displayMode: Boolean(displayMode),
-        throwOnError: false,
-        strict: false,
-        trust: false,
-      });
-    } catch (_) {
-      return null;
-    }
-  }
-
-  // Replaces $...$ and \(...\) spans with tokens, pushing the raw LaTeX onto
-  // `store`. Delimiters must hug their content ($x$, not $ x $) and a closing
-  // $ followed by a digit is treated as currency, not math.
-  function protectInlineMath(text, store) {
-    let out = text.replace(/\\\(([\s\S]+?)\\\)/g, function(_, tex) {
-      store.push(tex);
-      return INLINE_MATH_TOKEN + (store.length - 1) + "\u0000";
-    });
-    out = out.replace(/\\\$/g, ESCAPED_DOLLAR_TOKEN);
-    out = out.replace(/\$(?![\s$])([^$\n]*?[^\s$])\$(?!\d)/g, function(_, tex) {
-      store.push(tex);
-      return INLINE_MATH_TOKEN + (store.length - 1) + "\u0000";
-    });
-    return out.split(ESCAPED_DOLLAR_TOKEN).join("$");
-  }
-
-  function restoreInlineMath(html, store) {
-    return html.replace(/\u0000MATHINLINE_(\d+)\u0000/g, function(_, idx) {
-      const tex = store[Number(idx)];
-      if (tex === undefined) return "";
-      const rendered = renderMathToHtml(tex, false);
-      if (rendered !== null) return rendered;
-      return '<code class="math-raw">' + escapeHtml("$" + tex + "$") + "</code>";
-    });
-  }
-
-  function renderInlineMarkdown(text) {
-    const codeStore = [];
-    const mathStore = [];
-    let out = String(text ?? "").replace(/`([^`\n]+)`/g, function(_, code) {
-      codeStore.push(code);
-      return INLINE_CODE_TOKEN + (codeStore.length - 1) + "\u0000";
-    });
-    out = protectInlineMath(out, mathStore);
-    out = escapeHtml(out);
-    out = out.replace(/\*\*([^*]+)\*\*/g, "<strong>$1</strong>");
-    out = out.replace(/\*([^*\n]+)\*/g, "<em>$1</em>");
-    out = out.replace(/\[([^\]]+)\]\((https?:\/\/[^\s)]+)\)/g, '<a href="$2" target="_blank" rel="noopener noreferrer" style="color: var(--accent);">$1</a>');
-    out = out.replace(/\u0000CODEINLINE_(\d+)\u0000/g, function(_, idx) {
-      const code = codeStore[Number(idx)];
-      return code === undefined ? "" : "<code>" + escapeHtml(code) + "</code>";
-    });
-    return restoreInlineMath(out, mathStore);
-  }
-
-  function renderMarkdown(md) {
-    if (!md) return "<p><em>No content available.</em></p>";
-    const codeBlocks = [];
-    let fenced = String(md).replace(/```([a-zA-Z0-9_-]*)\n([\s\S]*?)```/g, function(_, lang, code) {
-      const idx = codeBlocks.length;
-      const label = lang ? '<div style="font-family:var(--mono);font-size:10.5px;color:var(--text-dim);margin-bottom:4px;">' + escapeHtml(lang) + '</div>' : '';
-      codeBlocks.push('<pre>' + label + '<code>' + escapeHtml(code.replace(/\n$/, "")) + '</code></pre>');
-      return "\u0000CODEBLOCK_" + idx + "\u0000";
-    });
-
-    // Block-level math can span lines, so claim it before the text is split
-    // into lines and isolate it on a line of its own.
-    const displayMath = [];
-    function claimDisplayMath(tex) {
-      displayMath.push(tex.trim());
-      return "\n" + DISPLAY_MATH_TOKEN + (displayMath.length - 1) + "\u0000\n";
-    }
-    fenced = fenced.replace(/\$\$([\s\S]+?)\$\$/g, function(_, tex) {
-      return claimDisplayMath(tex);
-    });
-    fenced = fenced.replace(/\\\[([\s\S]+?)\\\]/g, function(_, tex) {
-      return claimDisplayMath(tex);
-    });
-
-    const lines = fenced.split(/\r?\n/);
-    const html = [];
-    let inUl = false;
-    let inOl = false;
-    let inQuote = false;
-    let tableRows = [];
-
-    function flushTable() {
-      if (tableRows.length === 0) return;
-      const parsedRows = tableRows.map(r =>
-        r.trim().replace(/^\|/, "").replace(/\|$/, "").split("|").map(c => c.trim())
-      );
-      tableRows = [];
-      if (parsedRows.length >= 2 && parsedRows[1].every(cell => /^:?-{2,}:?$/.test(cell))) {
-        const headers = parsedRows[0];
-        const bodyRows = parsedRows.slice(2);
-        html.push(
-          "<table><thead><tr>" +
-          headers.map(h => "<th>" + renderInlineMarkdown(h) + "</th>").join("") +
-          "</tr></thead><tbody>" +
-          bodyRows.map(row =>
-            "<tr>" + row.map(c => "<td>" + renderInlineMarkdown(c) + "</td>").join("") + "</tr>"
-          ).join("") +
-          "</tbody></table>"
-        );
-      } else {
-        parsedRows.forEach(row => {
-          html.push("<p>" + renderInlineMarkdown(row.join(" | ")) + "</p>");
-        });
-      }
-    }
-
-    function closeLists() {
-      flushTable();
-      if (inUl) { html.push("</ul>"); inUl = false; }
-      if (inOl) { html.push("</ol>"); inOl = false; }
-      if (inQuote) { html.push("</blockquote>"); inQuote = false; }
-    }
-
-    for (let i = 0; i < lines.length; i++) {
-      const raw = lines[i];
-      const trimmed = raw.trim();
-
-      if (!trimmed) {
-        closeLists();
-        continue;
-      }
-
-      if (/^\|.*\|$/.test(trimmed)) {
-        if (inUl) { html.push("</ul>"); inUl = false; }
-        if (inOl) { html.push("</ol>"); inOl = false; }
-        if (inQuote) { html.push("</blockquote>"); inQuote = false; }
-        tableRows.push(trimmed);
-        continue;
-      } else {
-        flushTable();
-      }
-
-      if (/^(-{3,}|\*{3,}|_{3,})$/.test(trimmed)) {
-        closeLists();
-        html.push('<hr style="border:none;border-top:1px solid var(--border);margin:14px 0;" />');
-        continue;
-      }
-
-      const codeMatch = trimmed.match(/^\u0000CODEBLOCK_(\d+)\u0000$/);
-      if (codeMatch) {
-        closeLists();
-        html.push(codeBlocks[Number(codeMatch[1])]);
-        continue;
-      }
-
-      const displayMathMatch = trimmed.match(/^\u0000MATHDISPLAY_(\d+)\u0000$/);
-      if (displayMathMatch) {
-        closeLists();
-        const tex = displayMath[Number(displayMathMatch[1])] || "";
-        const rendered = renderMathToHtml(tex, true);
-        html.push(
-          rendered !== null
-            ? '<div class="math-display">' + rendered + "</div>"
-            : '<div class="math-display"><pre><code class="math-raw">' + escapeHtml(tex) + "</code></pre></div>"
-        );
-        continue;
-      }
-
-      const headingMatch = trimmed.match(/^(#{1,6})\s+(.*)$/);
-      if (headingMatch) {
-        closeLists();
-        const level = Math.min(headingMatch[1].length, 4);
-        html.push("<h" + level + ">" + renderInlineMarkdown(headingMatch[2]) + "</h" + level + ">");
-        continue;
-      }
-
-      const ulMatch = raw.match(/^\s*[-*+]\s+(.*)$/);
-      if (ulMatch) {
-        if (inOl || inQuote) closeLists();
-        if (!inUl) { html.push("<ul>"); inUl = true; }
-        html.push("<li>" + renderInlineMarkdown(ulMatch[1]) + "</li>");
-        continue;
-      }
-
-      const olMatch = raw.match(/^\s*\d+[.)]\s+(.*)$/);
-      if (olMatch) {
-        if (inUl || inQuote) closeLists();
-        if (!inOl) { html.push("<ol>"); inOl = true; }
-        html.push("<li>" + renderInlineMarkdown(olMatch[1]) + "</li>");
-        continue;
-      }
-
-      const quoteMatch = raw.match(/^\s*>\s?(.*)$/);
-      if (quoteMatch) {
-        if (inUl || inOl) closeLists();
-        if (!inQuote) { html.push("<blockquote>"); inQuote = true; }
-        html.push("<p>" + renderInlineMarkdown(quoteMatch[1]) + "</p>");
-        continue;
-      }
-
-      closeLists();
-      html.push("<p>" + renderInlineMarkdown(trimmed) + "</p>");
-    }
-    closeLists();
-
-    let joined = html.join("\n");
-    joined = joined.replace(/\u0000CODEBLOCK_(\d+)\u0000/g, function(_, idx) {
-      return codeBlocks[Number(idx)] || "";
-    });
-    return joined;
-  }
-
   function findRunById(id) {
     if (!id) return null;
     return state.sessionRuns.find(r => r.id === id) || state.dbRuns.find(r => r.id === id) || null;
@@ -1559,7 +1355,7 @@ _UI_HTML = r"""<!doctype html>
       : '<span class="badge">member ' + (index + 1) + ' of ' + total + '</span>';
     const bodyHtml = isError
       ? `<p style="color:#ff948f;font-family:var(--mono);font-size:13px;">${escapeHtml(ans.error)}</p>`
-      : renderMarkdown(ans.content || "");
+      : renderLatexDocument(ans.content || "");
 
     return `
       <article class="${cardClass}" data-answer-index="${index}">
@@ -1574,6 +1370,28 @@ _UI_HTML = r"""<!doctype html>
           </div>
         </header>
         <div class="markdown-body">${bodyHtml}</div>
+      </article>
+    `;
+  }
+
+  function renderPromptCard(run) {
+    const raw = run.prompt || "";
+    return `
+      <article class="answer-card">
+        <header class="answer-header">
+          <div class="answer-model">
+            <span>📄 Stored prompt</span>
+            <span class="badge">${raw.length} characters</span>
+          </div>
+          <div class="answer-meta">
+            <button type="button" class="copy-btn" data-copy-text="${escapeHtml(raw)}">Copy</button>
+          </div>
+        </header>
+        <div class="markdown-body">${renderLatexDocument(raw)}</div>
+        <details class="raw-source">
+          <summary>Raw prompt source</summary>
+          <pre>${escapeHtml(raw)}</pre>
+        </details>
       </article>
     `;
   }
@@ -1596,7 +1414,7 @@ _UI_HTML = r"""<!doctype html>
             <button type="button" class="copy-btn" data-copy-text="${escapeHtml(run.synthesis || "")}">Copy</button>
           </div>
         </header>
-        <div class="markdown-body">${renderMarkdown(run.synthesis || "")}</div>
+        <div class="markdown-body">${renderLatexDocument(run.synthesis || "")}</div>
       </article>
     `;
   }
@@ -1659,6 +1477,9 @@ _UI_HTML = r"""<!doctype html>
     if (hasSynthesis || (!run.running && answers.length > 0)) {
       paginationBar.style.display = "flex";
       const pages = [];
+      if (run.prompt) {
+        pages.push({ key: "prompt", label: "📄 Prompt", cls: "" });
+      }
       if (hasSynthesis) {
         pages.push({ key: "synthesis", label: "⚖️ Synthesis", cls: "synthesis-tab" });
       }
@@ -1702,7 +1523,8 @@ _UI_HTML = r"""<!doctype html>
       paginationBar.querySelectorAll(".page-tab[data-page-key]").forEach(btn => {
         btn.addEventListener("click", function() {
           const rawKey = btn.getAttribute("data-page-key");
-          state.activePage = (rawKey === "synthesis" || rawKey === "all") ? rawKey : Number(rawKey);
+          const namedPage = rawKey === "synthesis" || rawKey === "all" || rawKey === "prompt";
+          state.activePage = namedPage ? rawKey : Number(rawKey);
           renderWorkspace();
         });
       });
@@ -1745,6 +1567,8 @@ _UI_HTML = r"""<!doctype html>
           .map((ans, idx) => renderAnswerCard(ans, idx, totalExpected || answers.length))
           .join("");
       }
+    } else if (state.activePage === "prompt" && run.prompt) {
+      answersContainer.innerHTML = renderPromptCard(run);
     } else if (state.activePage === "synthesis" && hasSynthesis) {
       answersContainer.innerHTML = renderSynthesisCard(run);
     } else if (typeof state.activePage === "number" && answers[state.activePage]) {

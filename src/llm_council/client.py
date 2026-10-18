@@ -9,7 +9,7 @@ import threading
 import time
 from datetime import UTC, datetime
 from email.utils import parsedate_to_datetime
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import httpx
 
@@ -17,11 +17,15 @@ from .config import Settings
 from .errors import OpenRouterError
 from .models import ModelAnswer, model_exclusion_reason
 
+if TYPE_CHECKING:
+    from google import genai
+
 logger = logging.getLogger(__name__)
 
 # Share of completion tokens spent on reasoning above which a truncated answer is
 # attributed to reasoning; below it, more budget mainly buys visible answer text.
 REASONING_DOMINATED_SHARE = 0.5
+GEMINI_DEFAULT_CONTEXT_LENGTH = 1_048_576
 
 
 def _token_count(value: Any) -> int | None:
@@ -77,6 +81,16 @@ class OpenRouterClient:
             headers={"Authorization": f"Bearer {settings.api_key}"},
             timeout=settings.timeout,
         )
+        self.gemini: genai.Client | None = None
+        if settings.gemini_api_key.strip():
+            from google import genai
+            from google.genai import types as genai_types
+
+            timeout_ms = max(1, int(math.ceil(settings.timeout * 1000)))
+            self.gemini = genai.Client(
+                api_key=settings.gemini_api_key.strip(),
+                http_options=genai_types.HttpOptions(timeout=timeout_ms),
+            )
         self._rate_lock = threading.Lock()
         self._next_request = 0.0
 
@@ -85,6 +99,8 @@ class OpenRouterClient:
 
     def __exit__(self, *_: object) -> None:
         self.http.close()
+        if self.gemini is not None:
+            self.gemini.close()
 
     def _pace(self) -> None:
         with self._rate_lock:
@@ -116,10 +132,11 @@ class OpenRouterClient:
         return min(2.0**attempt, self.settings.max_retry_wait)
 
     def _redact(self, message: str) -> str:
-        """Remove the configured API key from diagnostics, including JSON-escaped keys."""
-        if self.settings.api_key:
-            for key in (self.settings.api_key, json.dumps(self.settings.api_key)[1:-1]):
-                message = message.replace(key, "[redacted]")
+        """Remove configured API keys from diagnostics, including JSON-escaped keys."""
+        for raw_key in (self.settings.api_key, self.settings.gemini_api_key):
+            if raw_key:
+                for key in (raw_key, json.dumps(raw_key)[1:-1]):
+                    message = message.replace(key, "[redacted]")
         return message
 
     def _error_detail(self, error: Any, status: int | None = None) -> str:
@@ -210,9 +227,13 @@ class OpenRouterClient:
             raise OpenRouterError(f"OpenRouter error {status}: {message}", status)
         raise AssertionError("Retry loop must return or raise")
 
-    def list_models(self, *, free_only: bool = True, **filters: str | int) -> list[dict[str, Any]]:
-        models: list[dict[str, Any]] = []
+    def _fetch_openrouter_models(
+        self, *, free_only: bool = True, **filters: str | int
+    ) -> list[dict[str, Any]]:
+        raw_models: list[dict[str, Any]] = []
         offset = 0
+        if not self.settings.api_key.strip():
+            return raw_models
         while True:
             params: dict[str, str | int] = {
                 **filters,
@@ -230,12 +251,7 @@ class OpenRouterClient:
             page = payload.get("data")
             if not isinstance(page, list) or any(not isinstance(item, dict) for item in page):
                 raise OpenRouterError("OpenRouter catalog is missing its model list.")
-            for model in page:
-                reason = model_exclusion_reason(model, self.settings.excluded_models)
-                if reason is None:
-                    models.append(model)
-                else:
-                    logger.debug("Skipping model %s: %s", model.get("id", "<missing>"), reason)
+            raw_models.extend(page)
             # Pagination counts raw catalog entries, not the smaller eligible subset.
             offset += len(page)
             links = payload.get("links")
@@ -252,11 +268,278 @@ class OpenRouterClient:
                 break
             if offset > 100_000:
                 raise OpenRouterError("OpenRouter catalog pagination did not terminate.")
+        return raw_models
+
+    @staticmethod
+    def _strip_gemini_prefix(model_id: str) -> str:
+        stripped = model_id.strip()
+        for prefix in ("google/", "models/"):
+            if stripped.startswith(prefix):
+                stripped = stripped[len(prefix) :]
+        return stripped.removesuffix(":free")
+
+    def _match_configured_gemini_id(self, catalog_id: str) -> str | None:
+        if not self.settings.gemini_models:
+            return None
+        if catalog_id in self.settings.gemini_models:
+            return catalog_id
+        bare_catalog = self._strip_gemini_prefix(catalog_id)
+        for configured in self.settings.gemini_models:
+            if self._strip_gemini_prefix(configured) == bare_catalog:
+                return configured
+        return None
+
+    @staticmethod
+    def _as_gemini_catalog_entry(
+        configured_id: str, source: dict[str, Any] | None = None
+    ) -> dict[str, Any]:
+        entry: dict[str, Any] = dict(source) if source is not None else {}
+        entry["id"] = configured_id
+        entry["pricing"] = {"prompt": "0", "completion": "0", "output": "0", "request": "0"}
+        architecture = entry.get("architecture")
+        if not isinstance(architecture, dict):
+            entry["architecture"] = {
+                "input_modalities": ["text"],
+                "output_modalities": ["text"],
+            }
+        if not entry.get("context_length"):
+            entry["context_length"] = GEMINI_DEFAULT_CONTEXT_LENGTH
+        return entry
+
+    def list_models(self, *, free_only: bool = True, **filters: str | int) -> list[dict[str, Any]]:
+        has_gemini = bool(self.settings.gemini_models)
+        # When GEMINI_MODELS is configured alongside OpenRouter, query OpenRouter
+        # without price caps (or via an additional unfiltered call) so paid OpenRouter
+        # entries for Gemini models supply real context_length and intelligence ranking.
+        raw_page = self._fetch_openrouter_models(free_only=free_only, **filters)
+        unfiltered_for_gemini: list[dict[str, Any]] = []
+        if has_gemini and self.settings.api_key.strip():
+            if free_only:
+                unfiltered_for_gemini = self._fetch_openrouter_models(free_only=False, **filters)
+            else:
+                unfiltered_for_gemini = raw_page
+
+        models: list[dict[str, Any]] = []
+        seen_ids: set[str] = set()
+        is_ranked_query = "sort" in filters or "min_intelligence_index" in filters
+
+        if is_ranked_query and has_gemini and unfiltered_for_gemini:
+            free_ids = {str(item.get("id")) for item in raw_page if isinstance(item.get("id"), str)}
+            for item in unfiltered_for_gemini:
+                raw_id = item.get("id")
+                if not isinstance(raw_id, str):
+                    continue
+                matched_gemini = self._match_configured_gemini_id(raw_id)
+                if matched_gemini is not None:
+                    normalized = self._as_gemini_catalog_entry(matched_gemini, item)
+                    reason = model_exclusion_reason(normalized, self.settings.excluded_models)
+                    if reason is None and matched_gemini not in seen_ids:
+                        models.append(normalized)
+                        seen_ids.add(matched_gemini)
+                    elif reason is not None:
+                        logger.debug("Skipping model %s: %s", matched_gemini, reason)
+                    continue
+                if not free_only or raw_id in free_ids:
+                    reason = model_exclusion_reason(item, self.settings.excluded_models)
+                    if reason is None and raw_id not in seen_ids:
+                        models.append(item)
+                        seen_ids.add(raw_id)
+                    elif reason is not None:
+                        logger.debug("Skipping model %s: %s", raw_id, reason)
+            return models
+
+        gemini_metadata: dict[str, dict[str, Any]] = {}
+        for item in unfiltered_for_gemini:
+            raw_id = item.get("id")
+            if isinstance(raw_id, str):
+                matched = self._match_configured_gemini_id(raw_id)
+                if matched is not None and matched not in gemini_metadata:
+                    gemini_metadata[matched] = item
+
+        for model in raw_page:
+            raw_id = model.get("id")
+            matched_gemini = (
+                self._match_configured_gemini_id(raw_id) if isinstance(raw_id, str) else None
+            )
+            if matched_gemini is not None:
+                model = self._as_gemini_catalog_entry(
+                    matched_gemini, gemini_metadata.get(matched_gemini, model)
+                )
+            reason = model_exclusion_reason(model, self.settings.excluded_models)
+            if reason is None:
+                model_id_str = str(model["id"])
+                if model_id_str not in seen_ids:
+                    models.append(model)
+                    seen_ids.add(model_id_str)
+            else:
+                logger.debug("Skipping model %s: %s", model.get("id", "<missing>"), reason)
+
+        if not is_ranked_query:
+            for gemini_id in self.settings.gemini_models:
+                if gemini_id in seen_ids:
+                    continue
+                gemini_model = self._as_gemini_catalog_entry(
+                    gemini_id, gemini_metadata.get(gemini_id)
+                )
+                reason = model_exclusion_reason(gemini_model, self.settings.excluded_models)
+                if reason is None:
+                    models.append(gemini_model)
+                    seen_ids.add(gemini_id)
+                else:
+                    logger.debug("Skipping model %s: %s", gemini_id, reason)
         return models
+
+    def _is_gemini_model(self, model: str) -> bool:
+        return self._match_configured_gemini_id(model) is not None
+
+    @staticmethod
+    def _gemini_usage_dict(usage_metadata: Any) -> dict[str, Any]:
+        if usage_metadata is None:
+            return {}
+        prompt_tokens = getattr(usage_metadata, "prompt_token_count", None)
+        candidates_tokens = getattr(usage_metadata, "candidates_token_count", None)
+        thoughts_tokens = getattr(usage_metadata, "thoughts_token_count", None)
+        total_tokens = getattr(usage_metadata, "total_token_count", None)
+        if isinstance(usage_metadata, dict):
+            prompt_tokens = usage_metadata.get("prompt_token_count", prompt_tokens)
+            candidates_tokens = usage_metadata.get("candidates_token_count", candidates_tokens)
+            thoughts_tokens = usage_metadata.get("thoughts_token_count", thoughts_tokens)
+            total_tokens = usage_metadata.get("total_token_count", total_tokens)
+        usage: dict[str, Any] = {}
+        p_count = _token_count(prompt_tokens)
+        c_count = _token_count(candidates_tokens)
+        r_count = _token_count(thoughts_tokens)
+        t_count = _token_count(total_tokens)
+        if p_count is not None:
+            usage["prompt_tokens"] = p_count
+        if c_count is not None or r_count is not None:
+            completion = (c_count or 0) + (r_count or 0)
+            usage["completion_tokens"] = completion
+            if r_count is not None:
+                usage["completion_tokens_details"] = {"reasoning_tokens": r_count}
+        if t_count is not None:
+            usage["total_tokens"] = t_count
+        elif "prompt_tokens" in usage or "completion_tokens" in usage:
+            usage["total_tokens"] = usage.get("prompt_tokens", 0) + usage.get(
+                "completion_tokens", 0
+            )
+        return usage
+
+    def _complete_gemini(self, model: str, messages: list[dict[str, str]]) -> ModelAnswer:
+        if self.gemini is None:
+            raise OpenRouterError(f"GEMINI_API_KEY is required to call Gemini model {model!r}.")
+        from google.genai import errors as genai_errors
+        from google.genai import types as genai_types
+
+        system_parts: list[str] = []
+        contents: list[genai_types.Content] = []
+        for message in messages:
+            role = message.get("role", "user")
+            text = message.get("content", "")
+            if role == "system":
+                if text:
+                    system_parts.append(text)
+            else:
+                gemini_role = "model" if role == "assistant" else "user"
+                contents.append(
+                    genai_types.Content(
+                        role=gemini_role,
+                        parts=[genai_types.Part.from_text(text=text)],
+                    )
+                )
+        config_kwargs: dict[str, Any] = {}
+        if system_parts:
+            config_kwargs["system_instruction"] = "\n\n".join(system_parts)
+        if self.settings.max_tokens > 0:
+            config_kwargs["max_output_tokens"] = self.settings.max_tokens
+        gen_config = genai_types.GenerateContentConfig(**config_kwargs) if config_kwargs else None
+
+        if not system_parts and not contents:
+            contents.append(
+                genai_types.Content(
+                    role="user",
+                    parts=[genai_types.Part.from_text(text="")],
+                )
+            )
+        api_model_name = self._strip_gemini_prefix(model)
+        for attempt in range(self.settings.max_retries + 1):
+            logger.debug("Gemini generate_content %s (attempt %d)", model, attempt + 1)
+            self._pace()
+            try:
+                response = self.gemini.models.generate_content(
+                    model=api_model_name,
+                    contents=contents,
+                    config=gen_config,
+                )
+            except genai_errors.APIError as exc:
+                status = exc.code if isinstance(exc.code, int) else None
+                detail = exc.details if getattr(exc, "details", None) else (exc.message or str(exc))
+                message_text = self._error_detail(detail, status)
+                raw_resp = getattr(exc, "response", None)
+                retryable = status in {429, 500, 502, 503, 504}
+                if retryable and attempt < self.settings.max_retries:
+                    delay = (
+                        self._retry_delay(raw_resp, attempt)
+                        if isinstance(raw_resp, httpx.Response)
+                        else min(2.0**attempt, self.settings.max_retry_wait)
+                    )
+                    if delay <= self.settings.max_retry_wait:
+                        logger.warning(
+                            "Gemini error %s: %s; retrying %s in %.1fs (retry %d/%d)",
+                            status,
+                            message_text,
+                            model,
+                            delay,
+                            attempt + 1,
+                            self.settings.max_retries,
+                        )
+                        with self._rate_lock:
+                            self._next_request = max(self._next_request, time.monotonic() + delay)
+                        continue
+                prefix = f"Gemini error {status}" if status is not None else "Gemini error"
+                raise OpenRouterError(f"{prefix}: {message_text}", status) from exc
+            except httpx.RequestError as exc:
+                raise OpenRouterError(
+                    self._redact(f"Gemini transport failure ({type(exc).__name__}): {exc}")
+                ) from exc
+            except Exception as exc:
+                raise OpenRouterError(
+                    self._redact(f"Gemini error ({type(exc).__name__}): {exc}")
+                ) from exc
+
+            candidates = getattr(response, "candidates", None)
+            if not isinstance(candidates, list) or not candidates:
+                feedback = getattr(response, "prompt_feedback", None)
+                detail_msg = f" ({feedback})" if feedback else ""
+                raise OpenRouterError(
+                    self._redact(f"Model {model} returned no answer candidates.{detail_msg}")
+                )
+            candidate = candidates[0]
+            finish_reason = getattr(candidate, "finish_reason", None)
+            finish_name = getattr(finish_reason, "name", str(finish_reason or "")).upper()
+            content = getattr(response, "text", None)
+            usage = self._gemini_usage_dict(getattr(response, "usage_metadata", None))
+            if finish_name == "MAX_TOKENS" or finish_reason == "length":
+                partial = isinstance(content, str) and bool(content.strip())
+                raise OpenRouterError(
+                    f"Model {model} exhausted MAX_TOKENS: {_describe_length_stop(usage, partial)}"
+                )
+            if not isinstance(content, str) or not content.strip():
+                raise OpenRouterError(f"Model {model} returned no text answer.")
+            actual_model = getattr(response, "model_version", None)
+            return ModelAnswer(
+                requested_model=model,
+                model=actual_model if isinstance(actual_model, str) and actual_model else model,
+                content=content,
+                usage=usage,
+            )
+        raise AssertionError("Retry loop must return or raise")
 
     def complete(
         self, model: str, messages: list[dict[str, str]], *, free_only: bool = False
     ) -> ModelAnswer:
+        if self._is_gemini_model(model):
+            return self._complete_gemini(model, messages)
         body: dict[str, Any] = {
             "model": model,
             "messages": messages,

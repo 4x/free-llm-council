@@ -69,6 +69,28 @@ Multi-file runs produce a folder instead. Empty responses are never written. `--
 
 `--export-markdown` / `export_markdown()` skips runs whose target folder/file and contents already exist. Re-running is safe and idempotent. It only exports runs with a non-empty synthesis and non-empty `expected_files` for the active save modes.
 
+`--export-html` / `export_html()` likewise exports only runs with a non-empty synthesis, and skips a run when a file matching its name already holds byte-identical content. Changing report rendering therefore produces a new suffixed file rather than overwriting an existing one; delete the old report if you want the name reused.
+
+## HTML report problems
+
+- **The report opens but shows raw Markdown and LaTeX.** The report typesets in the viewer, so it needs JavaScript. The `<noscript>` block shows the raw synthesis meanwhile. A CSP that blocks inline scripts has the same effect.
+- **Math shows as a red error.** KaTeX rejected the construct and it was declared inside `$...$`, `$$...$$`, or `\[...\]`, which is taken at face value and shown as authored. Bare environments behave differently — see [LaTeX document problems](#latex-document-problems).
+- **`Expected 20 KaTeX @font-face rules … but inlined N`.** The vendored `static/katex/katex.min.css` no longer matches the shape the inliner expects (see `report.py`). Re-vendor consistently or update `_FONT_FACE_RE`; the export deliberately fails instead of writing a report that points at fonts it cannot embed.
+- **`Cannot read bundled asset …` / `Cannot read bundled font …`.** The package's `static/` assets are missing — usually a source checkout that lost them, or an install that did not include package data. Reinstall the package.
+- **Reports are ~650 KB each.** Expected: 20 `woff2` fonts are embedded so the file stands alone. The size is the price of working with no network.
+
+## LaTeX document problems
+
+Stored prompts are often pasted LaTeX documents; [docs/architecture/latex-documents.md](../architecture/latex-documents.md) records the rules these symptoms come from.
+
+- **A block shows its literal source in a highlighted box.** KaTeX rejected that block, so it is printed rather than rendered as wrong math. Usual causes: a command KaTeX does not define (`\label`, `\ref`, `\caption`, `\centering`, `\bigskip`) or a nested environment the extractor cannot follow. The surrounding document still renders.
+- **A line starting with `%` vanished.** It is a LaTeX comment. Comments are omitted from the rendered view because commented-out math would otherwise be typeset as if it were part of the document. Open **Raw prompt source** to see it.
+- **Prose looks truncated after a percent sign.** It should not: a `%` is only a comment at the start of a line or directly after `}`, `\`, `$`, or `]`. A `%` after a word or digit is kept, which is why `~20% of samples` survives.
+- **Something like `[semi]` appears where a number should be.** That is a `\ref{semi}` with nothing numbered to point at. The common case is a synthesis or answer referring to a label defined in the prompt: each field is numbered on its own, so printing the prompt's number in the synthesis would disagree with the synthesis's own numbering, and the target is shown instead. Check the **Prompt** page or the report's Prompt section for the number. If the label is defined in the same field and still shows bracketed, its equation was not numbered — which happens only when the block carrying it has the author's own `\tag`/`\notag`/`\nonumber`, is an `equation*`, or is a row-based environment such as `eqnarray`/`align`/`gather` rather than a plain `equation`.
+- **An equation shows no number beside it.** Only a plain `equation` block is numbered. `equation*`, `eqnarray`, `align`, and `gather` blocks are rendered without a number, as are equations whose author wrote `\tag` or `\notag`. KaTeX itself numbers nothing — an empty `katex-tag` element is all it produces — so the number comes from the renderer, and a block it does not number simply has none.
+- **Stray `$`, `<`, or `<y<1$` in the text.** The stored text itself has damaged `$` delimiters — common in material copied out of a PDF, where parts of formulas were lost before the prompt was ever saved. Delimiters that are not paired are left as literal text; they are not repaired, because deciding whether a lone `$` is math or currency is not reliably decidable.
+- **`eqnarray` still renders.** It is mapped onto KaTeX's `aligned`, so a document written with the older name typesets; its `&=&` bodies are retried as `aligned` when the original environment rejects them.
+
 ## DuckDB locked / missing tables
 
 - Do not run concurrent writer processes against the same DuckDB file; use separate files or serialize runs.
@@ -78,4 +100,5 @@ Multi-file runs produce a folder instead. Empty responses are never written. `--
 ## Auth and config
 
 - `Set OPENROUTER_API_KEY` means the key is missing after `.env` → env → override precedence. `Loading .env does not mutate process environment`.
+- `Set GEMINI_API_KEY in .env or the environment when GEMINI_MODELS is configured` means `GEMINI_MODELS` (or `--gemini-models`) is non-empty without a corresponding `GEMINI_API_KEY`.
 - `JUDGE_PROMPT` unreadable/invalid-UTF-8/blank fails before discovery, inference, or saving. Unset uses the built-in backup.

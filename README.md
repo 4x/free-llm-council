@@ -88,7 +88,8 @@ uv run llm-council -q "Compare Bayesian and frequentist inference" --judge large
 uv run llm-council -q "Explain entropy" --no-save
 uv run llm-council --followup "provide more details about that last security caveat" --copy
 uv run llm-council --export-markdown
-uv run llm-council --web --port 8765
+uv run llm-council --export-html
+uv run llm-council --web --open-browser --port 8765
 uv run llm-council -q "Explain entropy" --judge auto --judge-scope all
 python -m llm_council --help
 ```
@@ -101,9 +102,9 @@ the local HTML web interface.
 
 ### Web UI (`--web` / `--serve`)
 
-`uv run llm-council --web` starts a local HTTP/SSE workspace on `http://127.0.0.1:8765` with:
+`uv run llm-council --web` (or `--web --open-browser`, or the root `launch-web.cmd` / `launch-web.ps1` launchers) starts a local HTTP/SSE workspace on `http://127.0.0.1:8765` with:
 - A prominent prompt composer with `<New>`, `<Followup>`, `<Clear>` (clears the prompt textbox), and red `<Stop>` (disabled/grayed out unless an active LLM retrieval is in progress) buttons with hover tooltips, a paperclip file attachment button (`📎 Attach file`), a Judge Criterion selector (all built-in strategies plus custom model slug), and a one-click `✨ Improve Prompt` drawer.
-- Real-time Server-Sent Events (SSE) streaming of council member answers as each model finishes, followed by the synthesized response and pagination pills (`Synthesis`, numbered member tabs, `Prev`/`Next`, and `All Answers`).
+- Real-time Server-Sent Events (SSE) streaming of council member answers as each model finishes, followed by the synthesized response and pagination pills (`Prompt`, `Synthesis`, numbered member tabs, `Prev`/`Next`, and `All Answers`).
 - KaTeX typesetting of LaTeX in answers and syntheses. Inline `$...$` and `\(...\)` render inline; `$$...$$` and `\[...\]` render as centered display equations that scroll horizontally when they are wider than the card. Math inside fenced or inline code stays literal, as do currency amounts like `$5` and escaped `\$`.
 - Left-hand conversation history panel separating **Current Session** runs from **Saved in DuckDB** runs (rendered less prominently). Selecting any historical run populates its prompt and stored answers/synthesis (subject to availability), and clicking `<Followup>` while a conversation is selected follows up directly on that conversation.
 
@@ -136,6 +137,43 @@ or `xsel` on Linux); it reports an error if no supported utility is available. `
 `MARKDOWN_DIR` folders (or single synthesis files) without repeating API calls, skipping runs whose synthesis folder/file already
 exists. See [troubleshooting](docs/operations/troubleshooting.md) for quota, exclusion, and missing-Markdown cases.
 
+### LaTeX documents in stored text
+
+Prompts in stored runs are frequently a pasted LaTeX *document* rather than Markdown, and the older ones contain bare `\begin{eqnarray}...\end{eqnarray}` blocks with no `$` delimiters, `\section` commands, `%` comments, and command names whose backslashes were doubled by a PDF copy. All of that now typesets, in the web UI and in exported reports alike:
+
+- The prompt gets its own `Prompt` page in the workspace pagination, rendered the same way as answers, with a collapsible **Raw prompt source** block holding the exact stored text.
+- Bare math environments are typeset wherever they appear — prompt, synthesis, or member answer — including `eqnarray`, which is mapped onto KaTeX's `aligned` layout.
+- `\section` and friends become headings, non-math environments such as `thm`, `proof`, and `figure` become labelled prose, and `%` comments are resolved instead of printed.
+- Anything KaTeX cannot typeset is shown as its literal source in a highlighted block rather than as a red parse error, so a document with one broken block still renders the rest.
+- Equations are numbered and their references resolve: `\ref{defin}` prints the number of the equation labelled `defin` and `\eqref{semi}` prints it in parentheses, whether the reference comes before or after the equation. A reference whose label is not in the same field of the run keeps its target in brackets (`[semi]`) instead of printing a number that belongs to another document.
+- Literal percents (`~20% of samples`), currency amounts, and anything inside code spans or fenced blocks are never rewritten.
+
+The rules, the measurements behind them, and what is deliberately left alone are recorded in [docs/architecture/latex-documents.md](docs/architecture/latex-documents.md).
+
+### Self-contained HTML reports (`--export-html`)
+
+`--export-html` (or `llm_council.export_html()`) writes one `<slug>-report-<stamp>.html` file per
+stored run with a non-empty synthesis into `HTML_DIR` (default `html-output`, override with
+`--html-dir`). It makes no API calls and is idempotent: a report whose content already matches an
+existing file is skipped. Pass `run_id=` in Python to export a single stored run. `--export-markdown`
+and `--export-html` may be combined in one invocation.
+
+Each report is **self-contained**: it inlines the page styling, the KaTeX stylesheet with all 20
+`woff2` fonts converted to `data:` URIs, the KaTeX engine, and the Markdown renderer. A report
+therefore opens, archives, and prints with no network access and no copy of llm-council installed,
+and it typesets exactly what the web UI shows because both use the same renderer source
+(`src/llm_council/static/markdown_renderer.js`). The stored prompt is printed as a rendered
+document with its exact text available in a **Raw prompt source** block, so a rewritten prompt can
+always be checked against what was saved. Two consequences are worth knowing:
+
+- The file is roughly 650 KB because the fonts are embedded; that is the cost of being standalone.
+- It needs a JavaScript-capable viewer to typeset the Markdown and LaTeX. A `<noscript>` block
+  carries the raw synthesis so the file is never blank without it.
+
+```text
+html-output/<first-six-prompt-words>-report-<YYYYMMDDThhmm>.html
+```
+
 ## Configuration
 
 Copy [.env.example](.env.example) to `.env` in the **current working directory**.
@@ -145,14 +183,17 @@ against the current working directory. `--env-file` / `env_file=` selects anothe
 
 | Environment variable | Python setting / CLI flag | Default |
 |---|---|---|
-| `OPENROUTER_API_KEY` | `api_key` (Python only) | required |
+| `OPENROUTER_API_KEY` | `api_key` (Python only) | required (unless only `GEMINI_MODELS` are used) |
 | `OPENROUTER_BASE_URL` | `base_url` (Python only) | `https://openrouter.ai/api/v1` |
+| `GEMINI_API_KEY` | `gemini_api_key` (Python only) | empty; required when `GEMINI_MODELS` is set |
+| `GEMINI_MODELS` | `gemini_models` / `--gemini-models` | empty; comma-separated Gemini model IDs (e.g. `gemini-3.6-flash,gemini-3.7-flash,gemini-3.8-flash`) |
 | `LOG_LEVEL` | `log_level` / `--log-level` | `INFO` |
 | `SAVE_PROMPT` | `save_prompt` / `--save-prompt` | `duckdb` |
 | `SAVE_INITIAL_ANSWERS` | `save_initial_answers` / `--save-initial-answers` | `none` |
 | `SAVE_SYNTHESIS` | `save_synthesis` / `--save-synthesis` | `none` |
 | `DUCKDB_PATH` | `duckdb_path` / `--duckdb-path` | `council.duckdb` |
 | `MARKDOWN_DIR` | `markdown_dir` / `--markdown-dir` | `council-output` |
+| `HTML_DIR` | `html_dir` / `--html-dir` | `html-output` |
 | `JUDGE` | `judge` / `--judge` | `random` |
 | `JUDGE_SCOPE` | `judge_scope` / `--judge-scope` | `free` |
 | `JUDGE_PROMPT` | `judge_prompt` / `--judge-prompt` | unset (built-in backup) |
@@ -311,7 +352,14 @@ any model that already errored). This avoids repeating a known-failing endpoint.
 ## Discovery, costs, privacy, and limits
 
 - Every run fetches the live, paginated `/models` catalog with `input_modalities=text`
-  and `output_modalities=text`. The free-model catalog request also sets `max_price=0`
+  and `output_modalities=text` (when `OPENROUTER_API_KEY` is configured), and appends any
+  comma-separated model IDs configured in `GEMINI_MODELS`. When `GEMINI_MODELS` is set,
+  OpenRouter's catalog and ranking queries are also run without price caps so matching
+  OpenRouter entries (e.g. `google/gemini-3.8-flash`) supply `context_length` and
+  `intelligence-high-to-low` rankings for judge selection (`most-intelligent`,
+  `largest-context`, etc.), while actual generation calls for `GEMINI_MODELS` are
+  **always** executed directly via the [Gemini Developer API](https://googleapis.github.io/python-genai)
+  using `GEMINI_API_KEY` and never through OpenRouter. The free-model catalog request also sets `max_price=0`
   and `max_output_price=0`. Judge discovery with `judge_scope=all` repeats that catalog
   query without the price caps, and an explicit judge ID the free query hides is looked
   up unfiltered too, so paid judges stay selectable. Local validation requires zero prompt (`pricing.prompt`)

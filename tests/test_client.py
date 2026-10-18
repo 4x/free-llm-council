@@ -461,3 +461,194 @@ def test_content_parts(client):
     ]
     transport(client, lambda _: httpx.Response(200, json=payload))
     assert client.complete("model", []).content == "first\nsecond"
+
+
+def test_gemini_complete_converts_messages_and_usage(monkeypatch):
+    from types import SimpleNamespace
+
+    from google.genai import types as genai_types
+
+    captured_calls = []
+
+    class FakeModels:
+        def generate_content(self, *, model, contents, config=None):
+            captured_calls.append({"model": model, "contents": contents, "config": config})
+            return SimpleNamespace(
+                candidates=[SimpleNamespace(finish_reason=genai_types.FinishReason.STOP)],
+                text="Gemini answer text",
+                model_version="gemini-3.6-flash-001",
+                usage_metadata=SimpleNamespace(
+                    prompt_token_count=12,
+                    candidates_token_count=30,
+                    thoughts_token_count=8,
+                    total_token_count=50,
+                ),
+            )
+
+    class FakeGenaiClient:
+        def __init__(self, *, api_key=None, http_options=None):
+            self.api_key = api_key
+            self.http_options = http_options
+            self.models = FakeModels()
+            self.closed = False
+
+        def close(self):
+            self.closed = True
+
+    monkeypatch.setattr("google.genai.Client", FakeGenaiClient)
+
+    settings = Settings().with_overrides(
+        api_key="or-key",
+        gemini_api_key="gem-secret-key",
+        gemini_models="gemini-3.6-flash,gemini-3.7-flash",
+        request_interval=0,
+        max_tokens=1024,
+    )
+    with OpenRouterClient(settings) as instance:
+        assert instance.gemini is not None
+        assert instance.gemini.api_key == "gem-secret-key"
+        answer = instance.complete(
+            "gemini-3.6-flash",
+            [
+                {"role": "system", "content": "System instruction"},
+                {"role": "user", "content": "First user turn"},
+                {"role": "assistant", "content": "First model reply"},
+                {"role": "user", "content": "Followup question"},
+            ],
+            free_only=True,
+        )
+
+    assert instance.gemini.closed
+    assert answer.requested_model == "gemini-3.6-flash"
+    assert answer.model == "gemini-3.6-flash-001"
+    assert answer.content == "Gemini answer text"
+    assert answer.usage == {
+        "prompt_tokens": 12,
+        "completion_tokens": 38,
+        "completion_tokens_details": {"reasoning_tokens": 8},
+        "total_tokens": 50,
+    }
+    assert len(captured_calls) == 1
+    call = captured_calls[0]
+    assert call["model"] == "gemini-3.6-flash"
+    assert call["config"].system_instruction == "System instruction"
+    assert call["config"].max_output_tokens == 1024
+    assert [(c.role, c.parts[0].text) for c in call["contents"]] == [
+        ("user", "First user turn"),
+        ("model", "First model reply"),
+        ("user", "Followup question"),
+    ]
+
+
+def test_gemini_max_tokens_truncation_raises_actionable_error(monkeypatch):
+    from types import SimpleNamespace
+
+    from google.genai import types as genai_types
+
+    class FakeModels:
+        def generate_content(self, **_kwargs):
+            return SimpleNamespace(
+                candidates=[SimpleNamespace(finish_reason=genai_types.FinishReason.MAX_TOKENS)],
+                text="Partial Gemini answer",
+                model_version="gemini-3.6-flash",
+                usage_metadata=SimpleNamespace(
+                    prompt_token_count=10,
+                    candidates_token_count=100,
+                    thoughts_token_count=1948,
+                    total_token_count=2058,
+                ),
+            )
+
+    class FakeGenaiClient:
+        def __init__(self, **_kwargs):
+            self.models = FakeModels()
+
+        def close(self):
+            pass
+
+    monkeypatch.setattr("google.genai.Client", FakeGenaiClient)
+    settings = Settings().with_overrides(
+        api_key="or-key",
+        gemini_api_key="gem-secret-key",
+        gemini_models=("gemini-3.6-flash",),
+        request_interval=0,
+    )
+    with OpenRouterClient(settings) as instance:
+        with pytest.raises(OpenRouterError) as caught:
+            instance.complete("gemini-3.6-flash", [{"role": "user", "content": "Hi"}])
+    text = str(caught.value)
+    assert "exhausted MAX_TOKENS" in text
+    assert "reasoning used 1948 of 2048 completion tokens" in text
+    assert "A partial answer was returned and discarded." in text
+
+
+def test_gemini_api_error_retries_429_and_redacts_key(monkeypatch):
+    from types import SimpleNamespace
+
+    from google.genai import errors as genai_errors
+    from google.genai import types as genai_types
+
+    attempts = []
+
+    class FakeModels:
+        def generate_content(self, **_kwargs):
+            attempts.append(1)
+            if len(attempts) == 1:
+                resp = httpx.Response(429, headers={"Retry-After": "0"})
+                raise genai_errors.APIError(
+                    429,
+                    {
+                        "error": {
+                            "message": "Quota exceeded for gem-secret-key",
+                            "status": "RESOURCE_EXHAUSTED",
+                        }
+                    },
+                    resp,
+                )
+            return SimpleNamespace(
+                candidates=[SimpleNamespace(finish_reason=genai_types.FinishReason.STOP)],
+                text="Recovered Gemini answer",
+                model_version="gemini-3.7-flash",
+                usage_metadata=None,
+            )
+
+    class FakeGenaiClient:
+        def __init__(self, **_kwargs):
+            self.models = FakeModels()
+
+        def close(self):
+            pass
+
+    monkeypatch.setattr("google.genai.Client", FakeGenaiClient)
+    settings = Settings().with_overrides(
+        api_key="or-key",
+        gemini_api_key="gem-secret-key",
+        gemini_models=("gemini-3.7-flash",),
+        request_interval=0,
+        max_retries=1,
+    )
+    with OpenRouterClient(settings) as instance:
+        answer = instance.complete("gemini-3.7-flash", [{"role": "user", "content": "Hi"}])
+    assert answer.content == "Recovered Gemini answer"
+    assert len(attempts) == 2
+
+    # Permanent 403 error is not retried and redacts the Gemini API key
+    class FailModels:
+        def generate_content(self, **_kwargs):
+            resp = httpx.Response(403)
+            raise genai_errors.APIError(
+                403,
+                {"error": {"message": "Invalid key gem-secret-key"}},
+                resp,
+            )
+
+    monkeypatch.setattr(
+        "google.genai.Client",
+        lambda **_kw: SimpleNamespace(models=FailModels(), close=lambda: None),
+    )
+    with OpenRouterClient(settings) as instance:
+        with pytest.raises(OpenRouterError) as caught:
+            instance.complete("gemini-3.7-flash", [{"role": "user", "content": "Hi"}])
+    assert "gem-secret-key" not in str(caught.value)
+    assert "[redacted]" in str(caught.value)
+    assert caught.value.status_code == 403

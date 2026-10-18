@@ -18,7 +18,7 @@ from .config import LOG_LEVELS
 from .council import _read_prompt, improve_prompt, query
 from .errors import ConfigurationError, CouncilError
 from .judges import STRATEGIES
-from .storage import export_markdown
+from .storage import export_html, export_markdown
 from .web import DEFAULT_WEB_HOST, DEFAULT_WEB_PORT, serve_web
 
 
@@ -57,6 +57,11 @@ def parser() -> argparse.ArgumentParser:
         help="Export stored DuckDB runs with syntheses into Markdown folders and exit",
     )
     result.add_argument(
+        "--export-html",
+        action="store_true",
+        help=("Export stored DuckDB runs with syntheses as self-contained HTML reports and exit"),
+    )
+    result.add_argument(
         "--web",
         "--serve",
         dest="web",
@@ -73,6 +78,12 @@ def parser() -> argparse.ArgumentParser:
         type=int,
         default=DEFAULT_WEB_PORT,
         help=f"Bind port for --web (default: {DEFAULT_WEB_PORT})",
+    )
+    result.add_argument(
+        "--open-browser",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help="Open the default browser at the bound URL when starting --web",
     )
     result.add_argument("--copy", action="store_true", help="Copy the synthesis to the clipboard")
     result.add_argument("--env-file", help="Settings file (default: .env in the current directory)")
@@ -91,6 +102,7 @@ def parser() -> argparse.ArgumentParser:
     )
     result.add_argument("--duckdb-path", help="DuckDB file (default: council.duckdb)")
     result.add_argument("--markdown-dir", help="Markdown root directory (default: council-output)")
+    result.add_argument("--html-dir", help="HTML report directory (default: html-output)")
     result.add_argument(
         "--log-level",
         type=str.upper,
@@ -99,6 +111,10 @@ def parser() -> argparse.ArgumentParser:
     )
     result.add_argument(
         "--excluded-models", help="Comma-separated model IDs to skip (overrides EXCLUDED_MODELS)"
+    )
+    result.add_argument(
+        "--gemini-models",
+        help="Comma-separated Gemini model IDs to include (overrides GEMINI_MODELS)",
     )
     result.add_argument("--max-concurrency", type=int)
     result.add_argument("--request-interval", type=float, help="Seconds between request starts")
@@ -258,11 +274,13 @@ def main(argv: Sequence[str] | None = None) -> int:
     args = arg_parser.parse_args(argv)
     followup_prompt = args.followup_prompt
     should_export = args.export_markdown
+    should_export_html = args.export_html
     should_serve_web = args.web
     improve_arg = args.improve_prompt
     prompt_index = args.prompt_index
     if should_serve_web and (
         should_export
+        or should_export_html
         or followup_prompt is not None
         or args.file is not None
         or args.prompt is not None
@@ -271,7 +289,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     ):
         arg_parser.error(
             "--web cannot be combined with --question, --file, --followup, "
-            "--improve, --prompt, or --export-markdown"
+            "--improve, --prompt, --export-markdown, or --export-html"
         )
     if should_export and (
         followup_prompt is not None
@@ -283,6 +301,18 @@ def main(argv: Sequence[str] | None = None) -> int:
     ):
         arg_parser.error(
             "--export-markdown cannot be combined with --question, --file, --followup, "
+            "--improve, --prompt, or --no-save"
+        )
+    if should_export_html and (
+        followup_prompt is not None
+        or args.file is not None
+        or args.prompt is not None
+        or improve_arg is not None
+        or prompt_index is not None
+        or args.no_save
+    ):
+        arg_parser.error(
+            "--export-html cannot be combined with --question, --file, --followup, "
             "--improve, --prompt, or --no-save"
         )
     if improve_arg is not None and (
@@ -298,6 +328,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     if (
         not should_serve_web
         and not should_export
+        and not should_export_html
         and followup_prompt is None
         and improve_arg is None
         and prompt_index is None
@@ -309,9 +340,11 @@ def main(argv: Sequence[str] | None = None) -> int:
         options = vars(args)
         options.pop("followup_prompt")
         options.pop("export_markdown")
+        options.pop("export_html")
         options.pop("web")
         web_host = options.pop("host")
         web_port = options.pop("port")
+        open_browser = bool(options.pop("open_browser", False))
         options.pop("improve_prompt")
         options.pop("prompt_index")
         should_copy = options.pop("copy")
@@ -323,15 +356,19 @@ def main(argv: Sequence[str] | None = None) -> int:
                 options["save_prompt"] = "none"
                 options["save_initial_answers"] = "none"
                 options["save_synthesis"] = "none"
-            serve_web(host=web_host, port=web_port, **options)
+            serve_web(host=web_host, port=web_port, open_browser=open_browser, **options)
             return 0
-        if should_export:
+        if should_export or should_export_html:
             options.pop("prompt")
             options.pop("file")
             options.pop("no_save")
-            folders = export_markdown(**options)
-            for folder in folders:
-                print(folder)
+            written: list[Path] = []
+            if should_export:
+                written.extend(export_markdown(**options))
+            if should_export_html:
+                written.extend(export_html(**options))
+            for path in written:
+                print(path)
             return 0
         if improve_arg is not None:
             no_save = bool(options.pop("no_save", False))

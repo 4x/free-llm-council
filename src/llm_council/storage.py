@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import re
 import shutil
 from datetime import UTC, datetime
@@ -15,6 +16,19 @@ import duckdb
 from .config import SaveMode, Settings
 from .errors import StorageError
 from .models import ModelAnswer
+from .report import build_report_html
+
+logger = logging.getLogger("llm_council")
+
+# Shared by every exported artifact name so Markdown folders and HTML reports for
+# the same run sort together and collide predictably.
+ARTIFACT_STAMP_FORMAT = "%Y%m%dT%H%M"
+
+# Bound on how many stored runs a single HTML export considers; effectively "all of
+# them" for this tool while keeping the underlying history query finite.
+EXPORT_RUN_LIMIT = 5000
+
+HTML_REPORT_SUFFIX = ".html"
 
 _PROMPT_STOP_WORDS = {
     "a",
@@ -48,7 +62,7 @@ class RunStorage:
         self.prompt = prompt
         self.connection: Any = None
         self.folder: Path | None = None
-        self._markdown_stamp = datetime.now(UTC).strftime("%Y%m%dT%H%M")
+        self._markdown_stamp = datetime.now(UTC).strftime(ARTIFACT_STAMP_FORMAT)
         self._prompt_written = False
 
     def __enter__(self) -> RunStorage:
@@ -272,6 +286,10 @@ class RunStorage:
         slug = re.sub(r"[^a-z0-9-]+", "-", slug).strip("-")[:72] or "council-run"
         return slug
 
+    def report_base_name(self, stamp: str) -> str:
+        """Return the file name for the self-contained HTML report of this run."""
+        return f"{self._slug()}-report-{stamp}{HTML_REPORT_SUFFIX}"
+
     def _folder_base_name(self) -> str:
         return f"{self._slug()}-{self._markdown_stamp}"
 
@@ -415,6 +433,93 @@ def export_markdown(
                     exported.append(storage.folder)
     except (duckdb.Error, OSError) as exc:
         raise StorageError(f"Cannot export Markdown artifacts from DuckDB: {exc}") from exc
+    return tuple(exported)
+
+
+def _write_report(directory: Path, base_name: str, content: str) -> Path | None:
+    """Write one report atomically, or return None when an identical one exists.
+
+    Re-exporting is idempotent: an existing file with byte-identical content is left
+    alone, and any other collision takes the next free ``-N`` suffix so concurrent
+    exports never clobber each other.
+    """
+    stem = base_name[: -len(HTML_REPORT_SUFFIX)]
+    if directory.is_dir():
+        for existing in sorted(directory.glob(f"{stem}*{HTML_REPORT_SUFFIX}")):
+            try:
+                if existing.is_file() and existing.read_text(encoding="utf-8") == content:
+                    logger.debug("Identical report already present, skipping: %s", existing)
+                    return None
+            except (OSError, UnicodeDecodeError) as exc:
+                logger.warning("Cannot compare existing report %s: %s", existing, exc)
+    try:
+        directory.mkdir(parents=True, exist_ok=True)
+        candidate = directory / base_name
+        suffix = 2
+        while candidate.exists():
+            candidate = directory / f"{stem}-{suffix}{HTML_REPORT_SUFFIX}"
+            suffix += 1
+        staging = directory / f".{stem}-{uuid4().hex}.tmp"
+        try:
+            staging.write_text(content, encoding="utf-8")
+            try:
+                staging.rename(candidate)
+            except FileExistsError:
+                # A concurrent export claimed the name; take the next free suffix.
+                suffix = 2
+                while True:
+                    candidate = directory / f"{stem}-{suffix}{HTML_REPORT_SUFFIX}"
+                    suffix += 1
+                    if not candidate.exists():
+                        break
+                staging.rename(candidate)
+        except OSError:
+            staging.unlink(missing_ok=True)
+            raise
+    except OSError as exc:
+        raise StorageError(f"Cannot write HTML report into {directory}: {exc}") from exc
+    return candidate
+
+
+def export_html(
+    *,
+    env_file: str | Path | None = None,
+    settings: Settings | None = None,
+    run_id: str | None = None,
+    **overrides: Any,
+) -> tuple[Path, ...]:
+    """Export stored DuckDB runs with non-empty syntheses as self-contained HTML reports.
+
+    Each report is one ``<slug>-report-<stamp>.html`` file under ``html_dir`` that
+    inlines its own styling, fonts, and scripts, so it can be read and printed with
+    no network access. Pass ``run_id`` to export a single stored run. Runs whose
+    report is already present with identical content are skipped.
+    """
+    config = settings if settings is not None else Settings.from_env(env_file)
+    config = config.with_overrides(**overrides)
+    if not config.duckdb_path.is_file():
+        raise StorageError(f"DuckDB file {config.duckdb_path} does not exist.")
+    runs = load_history(settings=config, limit=EXPORT_RUN_LIMIT)
+    exported: list[Path] = []
+    for run in runs:
+        if run_id is not None and str(run.get("id")) != run_id:
+            continue
+        synthesis = run.get("synthesis")
+        if not isinstance(synthesis, str) or not synthesis.strip():
+            continue
+        storage = RunStorage(config, str(run.get("id")), run.get("prompt") or "")
+        stamp = datetime.fromtimestamp(float(run.get("created_at") or 0.0), tz=UTC).strftime(
+            ARTIFACT_STAMP_FORMAT
+        )
+        base_name = storage.report_base_name(stamp)
+        try:
+            report = build_report_html(run)
+        except StorageError as exc:
+            logger.error("Cannot render HTML report for run %s: %s", run.get("id"), exc)
+            raise
+        path = _write_report(config.html_dir, base_name, report)
+        if path is not None:
+            exported.append(path)
     return tuple(exported)
 
 

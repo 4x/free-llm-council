@@ -2,6 +2,8 @@
 # conversion to these: the minified bundles are diffed byte-for-byte against
 # upstream releases and the woff2 fonts are binary.
 src/llm_council/static/** -text
-src/llm_council/static/** linguist-vendored
+# Only the third-party bundle is vendored; markdown_renderer.js in this directory
+# is first-party source and should still count as our code.
+src/llm_council/static/katex/** linguist-vendored
 
 *.woff2 binary

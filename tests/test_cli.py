@@ -30,6 +30,8 @@ def cli_env(router):
         AUTO_ROUTER_MODEL="",
         JUDGE_PROMPT="",
         EXCLUDED_MODELS="",
+        GEMINI_API_KEY="",
+        GEMINI_MODELS="",
     )
     return env
 
@@ -453,6 +455,10 @@ def test_cli_env_file(cli_env, tmp_path):
         ["--prompt", "1", "--followup", "x"],
         ["--export-markdown", "--improve", "x"],
         ["--export-markdown", "--prompt", "1"],
+        ["--question", "x", "--export-html"],
+        ["--export-html", "--no-save"],
+        ["--export-html", "--improve", "x"],
+        ["--export-html", "--prompt", "1"],
     ],
 )
 def test_cli_invalid_usage(cli_env, router, tmp_path, args):
@@ -568,6 +574,50 @@ def test_cli_export_markdown_backfills_stored_duckdb_runs(cli_env, router, tmp_p
     assert str(folders[0].name) in export_result.stdout
 
 
+def test_cli_export_html_writes_self_contained_reports(cli_env, router, tmp_path):
+    """--export-html writes one standalone report per stored synthesis with no API calls."""
+    run_result = run_cli(
+        ["-q", "Exported report question", "--save-synthesis", "duckdb"],
+        tmp_path,
+        cli_env,
+    )
+    assert run_result.returncode == 0, run_result.stderr
+    assert not (tmp_path / "html-output").exists()
+    router.calls.clear()
+    router.gets.clear()
+
+    export_result = run_cli(["--export-html"], tmp_path, cli_env)
+    assert export_result.returncode == 0, export_result.stderr
+    assert not router.calls and not router.gets
+
+    reports = list((tmp_path / "html-output").glob("*.html"))
+    assert len(reports) == 1
+    assert reports[0].name in export_result.stdout
+    content = reports[0].read_text(encoding="utf-8")
+    assert content.startswith("<!doctype html>")
+    assert "Synthesized fixture answer" in content
+    assert "url(data:font/woff2;base64," in content
+
+
+def test_cli_export_html_honours_html_dir(cli_env, router, tmp_path):
+    """--html-dir redirects where reports are written."""
+    assert (
+        run_cli(["-q", "Question", "--save-synthesis", "duckdb"], tmp_path, cli_env).returncode == 0
+    )
+
+    result = run_cli(["--export-html", "--html-dir", "reports-here"], tmp_path, cli_env)
+
+    assert result.returncode == 0, result.stderr
+    assert len(list((tmp_path / "reports-here").glob("*.html"))) == 1
+    assert not (tmp_path / "html-output").exists()
+
+
+def test_cli_web_conflicts_with_export_html(cli_env, tmp_path):
+    result = run_cli(["--web", "--export-html"], tmp_path, cli_env)
+    assert result.returncode == 2
+    assert "--web cannot be combined" in result.stderr
+
+
 def test_cli_missing_question_and_file_is_usage_error(cli_env, router, tmp_path):
     result = run_cli([], tmp_path, cli_env)
     assert result.returncode == 2
@@ -606,7 +656,43 @@ def test_cli_web_invokes_serve_web(monkeypatch, tmp_path):
     code = cli.main(["--web", "--port", "8910", "--judge", "largest-context", "--no-save"])
     assert code == 0
     assert captured["port"] == 8910
+    assert captured["open_browser"] is False
     assert captured["judge"] == "largest-context"
     assert captured["save_prompt"] == "none"
     assert captured["save_initial_answers"] == "none"
     assert captured["save_synthesis"] == "none"
+
+
+def test_cli_web_open_browser_flag_is_forwarded(monkeypatch):
+    """--open-browser forwards open_browser=True to serve_web."""
+    captured: dict[str, object] = {}
+
+    def fake_serve_web(**kwargs: object) -> None:
+        captured.update(kwargs)
+
+    monkeypatch.setattr("llm_council.cli.serve_web", fake_serve_web)
+    code = cli.main(["--web", "--open-browser"])
+    assert code == 0
+    assert captured["open_browser"] is True
+
+
+def test_cli_gemini_models_flag_is_forwarded(monkeypatch):
+    """--gemini-models forwards comma-separated Gemini models to query()."""
+    captured: dict[str, object] = {}
+
+    def fake_query(**kwargs: object) -> str:
+        captured.update(kwargs)
+        return "Synthesized answer"
+
+    monkeypatch.setattr(cli, "query", fake_query)
+    code = cli.main(
+        [
+            "-q",
+            "Question",
+            "--gemini-models",
+            "gemini-3.6-flash,gemini-3.7-flash,gemini-3.8-flash",
+            "--no-save",
+        ]
+    )
+    assert code == 0
+    assert captured["gemini_models"] == "gemini-3.6-flash,gemini-3.7-flash,gemini-3.8-flash"

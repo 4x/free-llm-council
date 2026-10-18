@@ -50,11 +50,14 @@ class SaveMode(StrEnum):
 class Settings:
     api_key: str = ""
     base_url: str = "https://openrouter.ai/api/v1"
+    gemini_api_key: str = ""
+    gemini_models: tuple[str, ...] = ()
     save_prompt: SaveMode = SaveMode.DUCKDB
     save_initial_answers: SaveMode = SaveMode.NONE
     save_synthesis: SaveMode = SaveMode.NONE
     duckdb_path: Path = Path("council.duckdb")
     markdown_dir: Path = Path("council-output")
+    html_dir: Path = Path("html-output")
     judge: str = "random"
     judge_prompt: Path | None = None
     free_router_model: str = ""
@@ -93,11 +96,14 @@ class Settings:
         mapping = {
             "api_key": "OPENROUTER_API_KEY",
             "base_url": "OPENROUTER_BASE_URL",
+            "gemini_api_key": "GEMINI_API_KEY",
+            "gemini_models": "GEMINI_MODELS",
             "save_prompt": "SAVE_PROMPT",
             "save_initial_answers": "SAVE_INITIAL_ANSWERS",
             "save_synthesis": "SAVE_SYNTHESIS",
             "duckdb_path": "DUCKDB_PATH",
             "markdown_dir": "MARKDOWN_DIR",
+            "html_dir": "HTML_DIR",
             "judge": "JUDGE",
             "judge_prompt": "JUDGE_PROMPT",
             "free_router_model": "FREE_ROUTER_MODEL",
@@ -125,7 +131,7 @@ class Settings:
             raise ConfigurationError(f"Unknown settings: {', '.join(sorted(unknown))}")
         converted = {key: value for key, value in overrides.items() if value is not None}
         try:
-            for key in ("excluded_models", "router_models"):
+            for key in ("excluded_models", "router_models", "gemini_models"):
                 if key in converted:
                     value = converted[key]
                     if isinstance(value, str):
@@ -140,7 +146,7 @@ class Settings:
             if "judge_prompt" in converted:
                 value = converted["judge_prompt"]
                 converted["judge_prompt"] = Path(value) if value else None
-            for key in ("free_router_model", "auto_router_model"):
+            for key in ("free_router_model", "auto_router_model", "gemini_api_key"):
                 if key in converted:
                     converted[key] = str(converted[key]).strip()
             if "log_level" in converted:
@@ -148,7 +154,7 @@ class Settings:
             for key in ("save_prompt", "save_initial_answers", "save_synthesis"):
                 if key in converted:
                     converted[key] = SaveMode.parse(converted[key])
-            for key in ("duckdb_path", "markdown_dir"):
+            for key in ("duckdb_path", "markdown_dir", "html_dir"):
                 if key in converted:
                     converted[key] = Path(converted[key])
             for key in ("max_concurrency", "max_retries", "max_tokens"):

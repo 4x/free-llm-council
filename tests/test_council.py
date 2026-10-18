@@ -485,3 +485,129 @@ def test_improve_prompt_calls_single_model_and_falls_back_on_error(config, route
     fallback_versions = improve_prompt("Draft question", settings=config)
     assert fallback_versions == ("Fallback 1", "Fallback 2")
     assert [call["model"] for call in router.calls] == ["test/beta:free", "test/alpha:free"]
+
+
+def test_gemini_models_env_parsing_and_missing_key_validation(
+    tmp_path, monkeypatch, config, router
+):
+    env_file = tmp_path / ".env"
+    env_file.write_text(
+        "OPENROUTER_API_KEY=or-key\n"
+        "GEMINI_API_KEY=gem-key\n"
+        "GEMINI_MODELS=gemini-3.6-flash, gemini-3.7-flash , gemini-3.8-flash, gemini-3.6-flash\n",
+        encoding="utf-8",
+    )
+    for var in ("GEMINI_API_KEY", "GEMINI_MODELS"):
+        monkeypatch.delenv(var, raising=False)
+    loaded = Settings.from_env(env_file)
+    assert loaded.gemini_api_key == "gem-key"
+    assert loaded.gemini_models == (
+        "gemini-3.6-flash",
+        "gemini-3.7-flash",
+        "gemini-3.8-flash",
+    )
+
+    with pytest.raises(ConfigurationError, match="GEMINI_API_KEY"):
+        query_result(
+            "Question",
+            settings=config.with_overrides(
+                gemini_api_key="",
+                gemini_models="gemini-3.6-flash,gemini-3.7-flash",
+            ),
+            no_save=True,
+        )
+    assert not router.calls
+
+
+def test_council_runs_gemini_models_alongside_openrouter_and_as_judge(config, router, monkeypatch):
+    from types import SimpleNamespace
+
+    from google.genai import types as genai_types
+
+    gemini_calls = []
+
+    class FakeModels:
+        def generate_content(self, *, model, contents, config=None):
+            gemini_calls.append({"model": model, "contents": contents, "config": config})
+            is_judge = bool(config and config.system_instruction)
+            text = "Gemini synthesized answer" if is_judge else f"Gemini answer: {model}"
+            return SimpleNamespace(
+                candidates=[SimpleNamespace(finish_reason=genai_types.FinishReason.STOP)],
+                text=text,
+                model_version=model,
+                usage_metadata=SimpleNamespace(
+                    prompt_token_count=5,
+                    candidates_token_count=10,
+                    thoughts_token_count=0,
+                    total_token_count=15,
+                ),
+            )
+
+    monkeypatch.setattr(
+        "google.genai.Client",
+        lambda **_kw: SimpleNamespace(models=FakeModels(), close=lambda: None),
+    )
+
+    result = query_result(
+        "Compare OpenRouter and Gemini",
+        settings=config.with_overrides(
+            gemini_api_key="gem-key",
+            gemini_models="gemini-3.6-flash,gemini-3.7-flash,gemini-3.8-flash",
+            judge="gemini-3.7-flash",
+        ),
+        no_save=True,
+    )
+    assert [ans.requested_model for ans in result.answers] == [
+        "gemini-3.6-flash",
+        "gemini-3.7-flash",
+        "gemini-3.8-flash",
+        "test/alpha:free",
+        "test/beta:free",
+    ]
+    assert result.judge_requested == "gemini-3.7-flash"
+    assert result.judge == "gemini-3.7-flash"
+    assert result.synthesis == "Gemini synthesized answer"
+    # 2 OpenRouter member calls; 3 Gemini member calls + 1 Gemini judge call
+    assert len(router.calls) == 2
+    assert len(gemini_calls) == 4
+    judge_payload = json.loads(gemini_calls[-1]["contents"][0].parts[0].text)
+    assert len(judge_payload["candidate_answers"]) == 5
+
+
+def test_gemini_only_council_without_openrouter_api_key(config, router, monkeypatch):
+    from types import SimpleNamespace
+
+    from google.genai import types as genai_types
+
+    class FakeModels:
+        def generate_content(self, *, model, contents, config=None):
+            is_judge = bool(config and config.system_instruction)
+            text = "Gemini-only synthesis" if is_judge else f"Answer from {model}"
+            return SimpleNamespace(
+                candidates=[SimpleNamespace(finish_reason=genai_types.FinishReason.STOP)],
+                text=text,
+                model_version=model,
+                usage_metadata=None,
+            )
+
+    monkeypatch.setattr(
+        "google.genai.Client",
+        lambda **_kw: SimpleNamespace(models=FakeModels(), close=lambda: None),
+    )
+
+    result = query_result(
+        "Gemini-only question",
+        settings=config.with_overrides(
+            api_key="",
+            gemini_api_key="gem-key",
+            gemini_models="gemini-3.6-flash,gemini-3.7-flash",
+            judge="random",
+        ),
+        no_save=True,
+    )
+    assert result.synthesis == "Gemini-only synthesis"
+    assert [ans.requested_model for ans in result.answers] == [
+        "gemini-3.6-flash",
+        "gemini-3.7-flash",
+    ]
+    assert not router.calls and not router.gets

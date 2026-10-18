@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import re
 import threading
 from threading import Event
 from urllib.error import HTTPError
@@ -198,13 +199,50 @@ def test_web_index_references_vendored_katex(web_url):
         html = resp.read().decode("utf-8")
 
     assert 'href="/static/katex/katex.min.css"' in html
-    assert 'src="/static/katex/katex.min.js"' in html
-    # The KaTeX script must be a blocking head load: the inline app script
-    # renders history immediately and needs window.katex to already exist.
-    katex_tag = html[html.index('src="/static/katex/katex.min.js"') - 40 :]
-    assert "defer" not in katex_tag[:40]
-    assert "renderMathToHtml" in html
     assert "math-display" in html
+
+    # Both script tags must be blocking head loads: the inline app script renders
+    # stored history immediately, so window.katex and the shared renderer have to
+    # already be defined by the time it runs. defer/async would break that.
+    script_tags = re.findall(r"<script[^>]*\ssrc=\"[^\"]+\"[^>]*>", html)
+    sources = " ".join(script_tags)
+    assert "katex.min.js" in sources
+    assert "markdown_renderer.js" in sources
+    assert all("defer" not in tag and "async" not in tag for tag in script_tags), script_tags
+
+
+def test_web_serves_shared_markdown_renderer(web_url):
+    """GET /static/markdown_renderer.js serves the renderer shared with HTML reports."""
+    with urlopen(f"{web_url}/static/markdown_renderer.js", timeout=5) as resp:
+        assert resp.status == 200
+        assert "text/javascript" in resp.headers.get("Content-Type", "")
+        source = resp.read().decode("utf-8")
+
+    for name in (
+        "escapeHtml",
+        "renderMathToHtml",
+        "renderInlineMarkdown",
+        "renderMarkdown",
+        "sanitizeLatexDocument",
+        "renderLatexDocument",
+    ):
+        assert f"function {name}" in source, name
+    assert "window.katex" in source
+
+
+def test_web_index_pages_a_rendered_prompt_alongside_synthesis_and_answers(web_url):
+    """A stored prompt gets its own page, rendered as a document with its source beside it."""
+    with urlopen(f"{web_url}/", timeout=5) as resp:
+        html = resp.read().decode("utf-8")
+
+    assert 'key: "prompt"' in html
+    assert "renderPromptCard(run)" in html
+    assert "function renderPromptCard(run)" in html
+    # The page key has to survive the string/number switch the tabs share with answers.
+    assert 'rawKey === "prompt"' in html
+    # Rendered output comes from the shared document view, and the raw text can be seen.
+    assert "renderLatexDocument(raw)" in html
+    assert "Raw prompt source" in html
 
 
 def test_web_serves_vendored_katex_assets(web_url):
