@@ -1,0 +1,415 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<title>markdown_renderer harness</title>
+<!--
+  Behavioural checks for src/llm_council/static/markdown_renderer.js.
+
+  The renderer is JavaScript and this project has no JavaScript test runner, so the
+  checks that need a real KaTeX build live here and are run by opening the page. See
+  tests/browser/README.md for the two commands. Everything here is self-contained: the
+  fixtures are inline and no database or network access is required.
+
+  A green page means every rule in the shared renderer behaves as documented, including
+  the cases that exist only because real stored runs produced them (doubled backslashes,
+  percent comments, eqnarray, unrenderable blocks).
+-->
+<link rel="stylesheet" href="../../src/llm_council/static/katex/katex.min.css" />
+<style>
+  body { font-family: system-ui, sans-serif; margin: 16px 20px 80px; max-width: 1100px; }
+  table.results { border-collapse: collapse; margin: 8px 0 24px; }
+  table.results td { border: 1px solid #ccc; padding: 2px 6px; font: 12px monospace; vertical-align: top; }
+  .pass { color: #0a7a1f; }
+  .fail { color: #c00; font-weight: 700; }
+  .case { border-top: 1px solid #ddd; padding: 10px 0; }
+  .case h3 { font-size: 13px; margin: 0 0 6px; font-family: monospace; }
+  .math-fallback { background: #fff3cd; }
+  .summary { font-size: 15px; font-weight: 700; }
+  .summary.failed { color: #c00; }
+</style>
+</head>
+<body>
+<h1>markdown_renderer harness</h1>
+<p id="summary" class="summary">running…</p>
+<div id="report"></div>
+<h2>Checks</h2>
+<div id="cases"></div>
+<h2>Fixture document, rendered</h2>
+<div id="fixture"></div>
+<script>
+  window.harnessErrors = [];
+  window.addEventListener("error", function (event) { window.harnessErrors.push(String(event.message)); });
+</script>
+<script src="../../src/llm_council/static/katex/katex.min.js"></script>
+<script src="../../src/llm_council/static/markdown_renderer.js"></script>
+<script>
+window.harness = (function () {
+  var results = [];
+  var raw = String.raw;
+  var caseHost = document.getElementById("cases");
+
+  function check(name, condition, detail) {
+    results.push({
+      name: name,
+      pass: Boolean(condition),
+      detail: detail === undefined ? "" : String(detail),
+    });
+  }
+
+  function run(name, html) {
+    var host = document.createElement("div");
+    host.className = "case";
+    var heading = document.createElement("h3");
+    heading.textContent = name;
+    host.appendChild(heading);
+    var body = document.createElement("div");
+    body.innerHTML = html;
+    host.appendChild(body);
+    caseHost.appendChild(host);
+    return body;
+  }
+
+  // KaTeX keeps the source TeX in a MathML annotation, so textContent of a rendered
+  // formula contains its own source. Only the visual half is compared here.
+  function visibleText(host) {
+    var clone = host.cloneNode(true);
+    Array.prototype.forEach.call(clone.querySelectorAll(".katex-mathml"), function (node) {
+      node.parentNode.removeChild(node);
+    });
+    return clone.textContent || "";
+  }
+
+  function stats(host) {
+    return {
+      katex: host.querySelectorAll(".katex").length,
+      errors: host.querySelectorAll(".katex-error").length,
+      fallback: host.querySelectorAll(".math-fallback").length,
+      text: visibleText(host),
+    };
+  }
+
+  // ---- API surface ------------------------------------------------------------------
+  check("escapeHtml is defined", typeof escapeHtml === "function");
+  check("renderMathToHtml is defined", typeof renderMathToHtml === "function");
+  check("renderInlineMarkdown is defined", typeof renderInlineMarkdown === "function");
+  check("renderMarkdown is defined", typeof renderMarkdown === "function");
+  check("sanitizeLatexDocument is defined", typeof sanitizeLatexDocument === "function");
+  check("renderLatexDocument is defined", typeof renderLatexDocument === "function");
+
+  // ---- Percent handling: a literal percent must never truncate a line ------------------
+  var percent = run("literal percents", renderLatexDocument(
+    "About 20% of the samples and 50-80% of the mass\nand the mode % of cases survive."));
+  check("percent after a digit survives", percent.textContent.indexOf("20% of the samples") !== -1);
+  check("percent range survives", percent.textContent.indexOf("50-80% of the mass") !== -1);
+  check("percent after a word survives", percent.textContent.indexOf("mode % of cases") !== -1);
+
+  var commented = run("whole-line comment", renderLatexDocument(
+    "%The first two moments are given by\nThe visible line stays."));
+  check("whole-line comment is dropped", commented.textContent.indexOf("first two moments") === -1,
+    commented.textContent);
+  check("text after a comment survives", commented.textContent.indexOf("The visible line stays") !== -1);
+
+  var commentedMath = run("commented-out math stays dead", renderLatexDocument(
+    raw`Real text.
+\label{semi}%\begin{array}{cc}a&b\end{array}
+More text.`));
+  var commentedStats = stats(commentedMath);
+  check("commented-out environment is not typeset",
+    commentedStats.katex === 0 && commentedStats.fallback === 0, JSON.stringify(commentedStats));
+  check("commented-out environment leaves no live source",
+    commentedStats.text.indexOf("begin{array}") === -1, commentedStats.text);
+
+  // ---- Bare environments (no $ delimiters) -------------------------------------------
+  var equation = run("bare equation", renderLatexDocument(
+    raw`\begin{equation}E = mc^2\end{equation}`));
+  var equationStats = stats(equation);
+  check("bare equation typesets", equationStats.katex >= 1, JSON.stringify(equationStats));
+  check("bare equation raises no error markup", equationStats.errors === 0);
+  check("bare equation leaves no literal source",
+    equationStats.text.indexOf("begin{equation}") === -1, equationStats.text);
+
+  var eqnarray = run("bare eqnarray", renderLatexDocument(
+    raw`\begin{eqnarray}
+w_1 &=& \frac{p}{p+q} \\
+w_2 &=& \frac{q}{p+q}
+\end{eqnarray}`));
+  var eqnarrayStats = stats(eqnarray);
+  check("bare eqnarray typesets via aligned", eqnarrayStats.katex >= 1, JSON.stringify(eqnarrayStats));
+  check("bare eqnarray does not fall back", eqnarrayStats.fallback === 0);
+
+  var bmatrix = run("bare bmatrix", renderLatexDocument(
+    raw`\begin{bmatrix}a & b \\ c & d\end{bmatrix}`));
+  check("bare bmatrix typesets", stats(bmatrix).katex >= 1, JSON.stringify(stats(bmatrix)));
+
+  var arrayWithSpec = run("bare array with a column spec", renderLatexDocument(
+    raw`\begin{array}{cc}a & b \\ c & d\end{array}`));
+  check("array with column spec typesets", stats(arrayWithSpec).katex >= 1,
+    JSON.stringify(stats(arrayWithSpec)));
+
+  var broken = run("unrenderable environment", renderLatexDocument(
+    raw`\begin{eqnarray}
+a &=& \thiscommandisnotdefined{b}
+\end{eqnarray}`));
+  var brokenStats = stats(broken);
+  check("unrenderable block falls back to source once", brokenStats.fallback === 1,
+    JSON.stringify(brokenStats));
+  check("fallback shows the literal source", brokenStats.text.indexOf("begin{eqnarray}") !== -1,
+    brokenStats.text);
+  check("fallback renders no KaTeX", brokenStats.katex === 0);
+
+  // ---- Escaping artefacts ------------------------------------------------------------
+  var doubledCommand = run("doubled command", renderLatexDocument("Inline $\\\\frac{a}{b}$ here."));
+  var doubledCommandStats = stats(doubledCommand);
+  check("doubled command renders as math", doubledCommandStats.katex >= 1,
+    JSON.stringify(doubledCommandStats));
+  check("doubled command does not print its name", doubledCommandStats.text.indexOf("frac") === -1,
+    doubledCommandStats.text);
+
+  var doubledDelimiter = run("doubled delimiters", renderLatexDocument(
+    raw`Bounds are \\(0.4097 \\leq C \\leq 0.4748\\) in the literature.`));
+  var doubledDelimiterStats = stats(doubledDelimiter);
+  check("doubled delimiters typeset as math", doubledDelimiterStats.katex >= 1,
+    JSON.stringify(doubledDelimiterStats));
+  check("doubled delimiters render the commands", doubledDelimiterStats.text.indexOf("leq") === -1,
+    doubledDelimiterStats.text);
+
+  var rowBreak = run("real row break is preserved", renderLatexDocument(
+    raw`\begin{align}a &= b \\ c &= d\end{align}`));
+  check("row break still typesets", stats(rowBreak).katex >= 1, JSON.stringify(stats(rowBreak)));
+
+  var codeShield = run("code spans stay literal", renderLatexDocument(
+    "Path `C:" + "\\\\Tools\\\\bin" + "` and $x$."));
+  check("code span keeps its backslashes",
+    stats(codeShield).text.indexOf("C:" + "\\\\Tools\\\\bin") !== -1, stats(codeShield).text);
+
+  var fencedShield = run("fenced code stays literal", renderLatexDocument(
+    "```\n" + "\\\\frac{a}{b}" + "\n```\n"));
+  check("fenced code keeps its backslashes", stats(fencedShield).text.indexOf("\\\\frac") !== -1,
+    stats(fencedShield).text);
+
+  // ---- Document structure ------------------------------------------------------------
+  var section = run("sectioning", renderLatexDocument(
+    raw`\section{Special and limiting cases}
+\subsection{Uniform}
+Body text.`));
+  check("section becomes an h2", section.querySelector("h2") !== null);
+  check("subsection becomes an h3", section.querySelector("h3") !== null);
+  check("section command is gone", section.textContent.indexOf(raw`\section`) === -1);
+
+  var theorem = run("theorem wrapper", renderLatexDocument(
+    raw`\begin{thm}[Density]
+Since $a^2 + b^2 = c^2$ holds.
+\end{thm}`));
+  var theoremStats = stats(theorem);
+  check("theorem wrapper becomes prose", theoremStats.text.indexOf("Theorem") !== -1,
+    theoremStats.text);
+  check("theorem wrapper leaves no markup", theoremStats.text.indexOf("begin{thm}") === -1);
+  check("math inside the theorem still renders", theoremStats.katex >= 1, JSON.stringify(theoremStats));
+
+  var items = run("itemize", renderLatexDocument(
+    raw`\begin{itemize}
+\item First point
+\item Second point
+\end{itemize}`));
+  check("itemize becomes two list items", items.querySelectorAll("li").length === 2);
+
+  var reference = run("labels and references", renderLatexDocument(
+    raw`Equation \ref{defin} defines $\boxed{f = x^2}$ for all $x$.`));
+  var referenceStats = stats(reference);
+  check("\\ref leaves no command behind", referenceStats.text.indexOf("ref{") === -1,
+    referenceStats.text);
+  check("\\ref keeps a visible marker", referenceStats.text.indexOf("[defin]") !== -1,
+    referenceStats.text);
+  check("\\label prints nothing",    referenceStats.text.indexOf("label") === -1,
+    referenceStats.text);
+
+  // ---- Equation numbering and resolved references -----------------------------------
+  // KaTeX assigns no equation numbers at all (its tag placeholder stays empty), so the
+  // number a reference prints and the number shown beside an equation are both supplied
+  // by the renderer. These checks are what hold them together.
+  function tagTexts(host) {
+    return Array.prototype.map.call(host.querySelectorAll(".katex-tag"), function (tag) {
+      // KaTeX pads its tag with zero-width spaces for spacing. They are not whitespace
+      // to String.trim, so they have to be stripped explicitly before comparing.
+      return tag.textContent.replace(/[\u200b\u200e\u200f]/g, "").trim();
+    });
+  }
+
+  var numbered = run("references resolve to the equation number", renderLatexDocument(
+    raw`See \ref{defin} above and \eqref{second} below.
+
+\begin{equation}\label{defin}a = b\end{equation}
+
+\begin{equation}\label{second}c = d\end{equation}`));
+  var numberedStats = stats(numbered);
+  var numberedTags = tagTexts(numbered);
+  check("a labelled equation is numbered", numberedTags[0] === "(1)", JSON.stringify(numberedTags));
+  check("equations number in document order", numberedTags[1] === "(2)",
+    JSON.stringify(numberedTags));
+  check("\\ref prints the bare number, as LaTeX does",
+    numberedStats.text.indexOf("See 1 above") !== -1, numberedStats.text);
+  check("\\eqref prints the parenthesised number",
+    numberedStats.text.indexOf("(2) below") !== -1, numberedStats.text);
+  check("a forward reference resolves like any other",
+    numberedStats.text.indexOf("[defin]") === -1, numberedStats.text);
+  check("the reference and the equation show the same number",
+    numberedStats.text.indexOf("See " + numberedTags[0].replace(/[()]/g, "") + " above") !== -1,
+    numberedStats.text);
+
+  var unknownRef = run("references without a target", renderLatexDocument(
+    raw`As shown in \ref{nowhere} and \cite{someone}.`));
+  check("an unknown reference keeps its target in brackets",
+    unknownRef.textContent.indexOf("[nowhere]") !== -1, unknownRef.textContent);
+  check("a citation keeps its target in brackets",
+    unknownRef.textContent.indexOf("[someone]") !== -1, unknownRef.textContent);
+
+  var firstDoc = run("numbering is per document", renderLatexDocument(
+    raw`\begin{equation}\label{one}p = q\end{equation}`));
+  var secondDoc = run("numbering is per document (independently)", renderLatexDocument(
+    raw`\begin{equation}\label{two}r = s\end{equation}`));
+  check("each rendered document numbers from one",
+    tagTexts(firstDoc)[0] === "(1)" && tagTexts(secondDoc)[0] === "(1)",
+    JSON.stringify([tagTexts(firstDoc), tagTexts(secondDoc)]));
+
+  var unnumbered = run("starred and suppressed equations", renderLatexDocument(
+    raw`\begin{equation*}a = b\end{equation*}
+
+\begin{equation}c = d\notag\end{equation}
+
+\begin{equation}\label{real}e = f\end{equation}`));
+  check("equation* and \\notag leave one number for the real equation",
+    tagTexts(unnumbered).length === 1 && tagTexts(unnumbered)[0] === "(1)",
+    JSON.stringify(tagTexts(unnumbered)));
+
+  var authorTag = run("an author's own tag", renderLatexDocument(
+    raw`\begin{equation}\tag{A}x = y\end{equation}`));
+  check("an author's tag is left exactly as written", tagTexts(authorTag)[0] === "(A)",
+    JSON.stringify(tagTexts(authorTag)));
+
+  var rowEnvironments = run("row environments consume no number", renderLatexDocument(
+    raw`\begin{eqnarray}a &=& b \\ c &=& d\end{eqnarray}
+
+\begin{equation}\label{after}x = y\end{equation}`));
+  check("an eqnarray does not consume a number", tagTexts(rowEnvironments)[0] === "(1)",
+    JSON.stringify(tagTexts(rowEnvironments)));
+
+  var codeNumbering = run("code spans are not numbered", renderLatexDocument(
+    "```\n" + raw`\begin{equation}\label{nope}z = w\end{equation}` + "\n```\n"));
+  check("an equation inside a code span is not numbered",
+    codeNumbering.querySelectorAll(".katex-tag").length === 0, codeNumbering.textContent);
+
+  var rejectedNumbered = run("a rejected numbered block", renderLatexDocument(
+    raw`\begin{equation}\label{bad}\thiscommandisnotdefined{x}\end{equation}`));
+  var rejectedStats = stats(rejectedNumbered);
+  check("a rejected numbered block falls back to its source", rejectedStats.fallback === 1,
+    JSON.stringify(rejectedStats));
+  check("the fallback does not show the tag this renderer added",
+    rejectedStats.text.indexOf("tag{") === -1, rejectedStats.text);
+  check("the fallback still shows what was stored",
+    rejectedStats.text.indexOf("begin{equation}") !== -1, rejectedStats.text);
+  check("math beside a dropped reference still renders", referenceStats.katex >= 1,
+    JSON.stringify(referenceStats));
+
+  var textCommand = run("math keeps its own \\text", renderLatexDocument(
+    raw`$x = 0 \text{ for } y \to 0$`));
+  var textCommandStats = stats(textCommand);
+  check("\\text inside math is not stripped", textCommandStats.text.indexOf("for") !== -1,
+    textCommandStats.text);
+  check("\\text inside math raises no error",
+    textCommandStats.katex >= 1 && textCommandStats.errors === 0, JSON.stringify(textCommandStats));
+
+  // ---- Regressions: plain Markdown and explicit delimiters ----------------------------
+  var markdown = run("plain Markdown", renderLatexDocument(
+    "# Title\n\n- a\n- b\n\n| a | b |\n| --- | --- |\n| 1 | 2 |\n"));
+  check("Markdown heading survives", markdown.querySelector("h1") !== null);
+  check("Markdown list survives", markdown.querySelectorAll("li").length === 2);
+  check("Markdown table survives", markdown.querySelector("table") !== null);
+
+  var display = run("$$ delimiters", renderMarkdown(raw`$$\int_0^1 x\,dx$$`));
+  check("$$ math still typesets",
+    stats(display).katex >= 1 && display.querySelector(".math-display") !== null);
+
+  var inline = run("$ delimiters", renderMarkdown(raw`Inline $a^2$ math.`));
+  check("inline $ math still typesets", stats(inline).katex >= 1);
+
+  var escaped = run("escaped dollar", renderMarkdown(raw`Costs \$5 and \$7.`));
+  check("escaped dollars stay literal", escaped.textContent.indexOf("$5 and $7") !== -1,
+    escaped.textContent);
+
+  // ---- A whole fixture document, as a stored prompt would arrive ----------------------
+  var FIXTURE = raw`%Derivation of the extended beta density
+\section{Definition}
+
+\begin{thm}[Density]
+For \\(x_1 < x < x_2\\) the density is
+\begin{equation}
+\label{defin}
+\boxed{f(x; x_1, x_2; p, q) = \frac{\left(x-x_1\right)^{p-1}\left(x_2-x\right)^{q-1}}{B(p, q)(x_2-x_1)^{p+q-1}}}
+\end{equation}
+\end{thm}
+
+Proof: integrating by substitution, with 100% of the mass covered and see \ref{defin}:
+
+\begin{eqnarray}
+y &\equiv& \frac{x - x_1}{x_2-x_1} \\
+\int_{x_1}^{x_2}\frac{y^{p-1}(1-y)^{q-1}}{B(p, q)}\frac{dx}{x_2-x_1} &=& \frac{1}{B(p, q)}\int_0^1 y^{p-1}(1-y)^{q-1}dy = 1.
+\end{eqnarray}
+
+\begin{figure}
+\centering
+\includegraphics[scale = 1]{mu048}
+\caption{The distribution for several means.}
+\end{figure}
+
+%The first two moments are given by
+The \textbf{mean} and \textbf{variance} are \emph{not} independent:
+
+\begin{itemize}
+\item the mean is \\(\mu = \frac{q x_1 + p x_2}{p+q}\\)
+\item the variance is \\(\sigma^2 = \frac{pq(x_1-x_2)^2}{(p + q)^2 (1 + p + q)}\\)
+\end{itemize}
+
+\begin{equation}
+x_m = \frac{(p-1)x_2 + (q-1)x_1}{p+q-2}
+\end{equation}
+`;
+
+  var fixtureHost = run("fixture document", renderLatexDocument(FIXTURE));
+  var fixture = stats(fixtureHost);
+  document.getElementById("fixture").innerHTML = fixtureHost.innerHTML;
+
+  check("fixture typesets every environment", fixture.katex >= 6, JSON.stringify(fixture));
+  check("fixture falls back on nothing", fixture.fallback === 0, JSON.stringify(fixture));
+  check("fixture raises no KaTeX errors", fixture.errors === 0, JSON.stringify(fixture));
+  check("fixture keeps no live environment source", fixture.text.indexOf("begin{") === -1,
+    fixture.text);
+  check("fixture turns a comment into nothing", fixture.text.indexOf("first two moments") === -1);
+  check("fixture keeps the literal percent", fixture.text.indexOf("100% of the mass") !== -1);
+  check("fixture keeps the dropped figure's caption text",
+    fixture.text.indexOf("The distribution for several means.") !== -1, fixture.text);
+  check("fixture renders a real heading", fixtureHost.querySelector("h2") !== null);
+  check("fixture renders a real list", fixtureHost.querySelectorAll("li").length === 2);
+  check("fixture renders bold text", fixtureHost.querySelector("strong") !== null);
+  check("fixture renders italic text", fixtureHost.querySelector("em") !== null);
+  check("no uncaught script errors", window.harnessErrors.length === 0, window.harnessErrors.join(" | "));
+
+  var failed = results.filter(function (result) { return !result.pass; });
+  document.getElementById("report").innerHTML = "<table class='results'>" + results.map(function (result) {
+    return "<tr><td class='" + (result.pass ? "pass" : "fail") + "'>" + (result.pass ? "PASS" : "FAIL") +
+      "</td><td>" + result.name + "</td><td>" + (result.detail || "").slice(0, 300) + "</td></tr>";
+  }).join("") + "</table>";
+
+  var summary = document.getElementById("summary");
+  summary.textContent = (results.length - failed.length) + " passed, " + failed.length + " failed";
+  if (failed.length > 0) summary.className = "summary failed";
+
+  return {
+    passed: results.length - failed.length,
+    failed: failed.map(function (result) { return result.name + " :: " + result.detail; }),
+    errors: window.harnessErrors,
+  };
+})();
+</script>
+</body>
+</html>
