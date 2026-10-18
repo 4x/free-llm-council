@@ -13,6 +13,7 @@ from .models import (
     council_models,
     is_free_model,
     model_exclusion_reason,
+    supports_tools,
 )
 
 STRATEGIES = ("random", "round-robin", "free-router", "auto", "most-intelligent", "largest-context")
@@ -62,6 +63,15 @@ def select_judge(
             ]
         if not matches or model_exclusion_reason(matches[0], settings.excluded_models) is not None:
             raise ConfigurationError(f"Unknown judge strategy or text model: {strategy!r}.")
+        if (
+            settings.search_web
+            and not supports_tools(matches[0])
+            and not client.is_gemini_model(strategy)
+        ):
+            raise ConfigurationError(
+                f"Judge model {strategy!r} does not support tool calling, which "
+                "search_web requires; choose a tool-capable judge or disable SEARCH_WEB."
+            )
         free = is_free_model(matches[0])
         if settings.judge_scope == "free" and not free:
             raise ConfigurationError("A paid judge requires judge_scope='all'.")
@@ -70,15 +80,26 @@ def select_judge(
         # Scope 'all' selects paid judges too, so query without the free-price filters.
         catalog = client.list_models(free_only=False)
     eligible = (
-        council_models(catalog, settings.excluded_models, settings.configured_routers)
+        council_models(
+            catalog,
+            settings.excluded_models,
+            settings.configured_routers,
+            require_tools=settings.search_web,
+        )
         if settings.judge_scope == "free"
         else [
             model
             for model in catalog
             if model_exclusion_reason(model, settings.excluded_models) is None
             and model["id"] not in settings.configured_routers
+            and (not settings.search_web or supports_tools(model))
         ]
     )
+    if settings.search_web and not eligible:
+        raise ConfigurationError(
+            "No eligible judge models support the tool calling that search_web requires; "
+            "use an explicit tool-capable judge or disable SEARCH_WEB."
+        )
     ids = sorted({model["id"] for model in eligible})
     if not ids:
         raise ConfigurationError("No eligible judge models were discovered.")

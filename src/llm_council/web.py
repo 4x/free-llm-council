@@ -449,6 +449,38 @@ _UI_HTML = r"""<!doctype html>
     color: var(--text-muted);
   }
 
+  .search-web-toggle {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    font-size: 12px;
+    color: var(--text-muted);
+    cursor: pointer;
+    user-select: none;
+    padding: 6px 9px;
+    border: 1px solid var(--border);
+    border-radius: 7px;
+    background: var(--bg-input);
+    white-space: nowrap;
+  }
+
+  .search-web-toggle:hover {
+    border-color: var(--border-strong);
+    color: var(--text);
+  }
+
+  .search-web-toggle input {
+    accent-color: var(--accent-strong);
+    cursor: pointer;
+    margin: 0;
+  }
+
+  .search-web-toggle.enabled {
+    color: var(--text);
+    border-color: var(--accent-strong);
+    background: var(--accent-soft);
+  }
+
   .judge-select, .judge-custom-input {
     background: var(--bg-input);
     color: var(--text);
@@ -1083,6 +1115,16 @@ _UI_HTML = r"""<!doctype html>
             />
           </div>
 
+          <label
+            id="search-web-toggle"
+            class="search-web-toggle"
+            for="search-web-checkbox"
+            title="Let OpenRouter run server-side web searches for tool-capable council members and the judge. Searches are billed per request on top of token costs, even for free models."
+          >
+            <input id="search-web-checkbox" type="checkbox" />
+            <span>🌐 Web search</span>
+          </label>
+
           <button
             id="improve-btn"
             type="button"
@@ -1167,6 +1209,8 @@ _UI_HTML = r"""<!doctype html>
   const attachFileBtn = document.getElementById("attach-file-btn");
   const attachmentRow = document.getElementById("attachment-row");
   const judgeSelect = document.getElementById("judge-select");
+  const searchWebToggle = document.getElementById("search-web-toggle");
+  const searchWebCheckbox = document.getElementById("search-web-checkbox");
   const judgeCustomInput = document.getElementById("judge-custom-input");
   const clearBtn = document.getElementById("clear-btn");
   const stopBtn = document.getElementById("stop-btn");
@@ -1665,6 +1709,7 @@ _UI_HTML = r"""<!doctype html>
       file_name: state.attachedFile ? state.attachedFile.name : null,
       file_content: state.attachedFile ? state.attachedFile.content : null,
       judge: judgeValue,
+      search_web: searchWebCheckbox.checked,
       previous_synthesis: null,
       prior_turns: null,
     };
@@ -1859,6 +1904,9 @@ _UI_HTML = r"""<!doctype html>
       ]);
       if (cfgResp.ok) {
         const cfg = await cfgResp.json();
+        if (typeof cfg.search_web === "boolean") {
+          searchWebCheckbox.checked = cfg.search_web;
+        }
         if (cfg.judge) {
           const builtIns = ["random", "round-robin", "most-intelligent", "largest-context", "free-router", "auto"];
           if (builtIns.includes(cfg.judge)) {
@@ -1882,6 +1930,10 @@ _UI_HTML = r"""<!doctype html>
   }
 
   // Event wiring
+  searchWebCheckbox.addEventListener("change", function() {
+    searchWebToggle.classList.toggle("enabled", searchWebCheckbox.checked);
+  });
+
   judgeSelect.addEventListener("change", function() {
     if (judgeSelect.value === "custom") {
       judgeCustomInput.style.display = "inline-block";
@@ -2065,6 +2117,7 @@ def create_web_server(
                         "save_prompt": base_settings.save_prompt.value,
                         "save_initial_answers": base_settings.save_initial_answers.value,
                         "save_synthesis": base_settings.save_synthesis.value,
+                        "search_web": base_settings.search_web,
                         "time_zone": os.environ.get("TIME_ZONE"),
                     }
                 )
@@ -2124,6 +2177,9 @@ def create_web_server(
                         return
 
                     judge = body.get("judge") or base_settings.judge
+                    search_web = body.get("search_web")
+                    if search_web is not None and not isinstance(search_web, bool):
+                        raise CouncilError("search_web must be a JSON boolean.")
                     previous_synthesis = body.get("previous_synthesis")
                     raw_prior_turns = body.get("prior_turns")
                     prior_turns: list[tuple[str, str]] | None = None
@@ -2159,6 +2215,7 @@ def create_web_server(
                         combined,
                         settings=base_settings,
                         judge=str(judge),
+                        search_web=search_web,
                         literal_prompt=True,
                         previous_synthesis=(
                             str(previous_synthesis)

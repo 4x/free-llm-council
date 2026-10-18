@@ -6,7 +6,7 @@ Audit of what `llm-council` uses from the OpenRouter API versus what the platfor
 
 | Surface | Where | Notes |
 | --- | --- | --- |
-| `POST /chat/completions` | [client.py](../../src/llm_council/client.py) `complete()` | `model`, `messages`, `stream: false`, optional `max_tokens`, `provider.max_price` for free-only enforcement |
+| `POST /chat/completions` | [client.py](../../src/llm_council/client.py) `complete()` | `model`, `messages`, `stream: false`, optional `max_tokens`, `provider.max_price` for free-only enforcement, and optional `tools: [{"type": "openrouter:web_search", "parameters": {"max_uses": 3}}]` for server-side web search |
 | `GET /models` | [client.py](../../src/llm_council/client.py) `list_models()` | Filters: `input_modalities=text`, `output_modalities=text`, `max_price=0`, `max_output_price=0`, `limit`, `offset`; plus `sort=intelligence-high-to-low` and `min_intelligence_index=0` for the `most-intelligent` judge |
 | Response `usage` | `complete()` → `ModelAnswer.usage` | Persisted to DuckDB; web UI shows `total_tokens` only |
 | Error metadata | `_request()` | Special-cases 402 `openrouter_in_flight_budget` vs. other 402; honors `Retry-After` |
@@ -103,11 +103,28 @@ Reference: [model endpoints](https://openrouter.ai/docs/api/api-reference/endpoi
 
 `stream: true` (SSE) would give token-level progress in the web UI instead of only per-completed-model events, and avoids the `ReadTimeout` "already submitted" ambiguity in `_request()`. Caveat: with streaming, a failure can arrive as an SSE event after HTTP 200, so the client would need to inspect the stream body, not just the status.
 
-### 9. Plugins
+### 9. Server tools (web search adopted; the rest unused)
 
-`plugins: [{id: ...}]` exposes `web` (search/grounding), `file-parser` (PDF input — useful for PDF prompt files), `response-healing` (repairs malformed JSON, an alternative to gap 3), and `context-compression`. Context compression is directly relevant to the judge failure that tells users to "try largest-context": it could let an ordinary judge digest a large council.
+`SEARCH_WEB` sends `tools: [{"type": "openrouter:web_search", "parameters": {"max_uses": 3}}]`, the current server-tool replacement for the deprecated `plugins: [{id: "web"}]` and `:online` surfaces. The model decides whether to search and may search up to `max_uses` times; `usage.server_tool_use.web_search_requests` reports how often it did. Discovery uses `supported_parameters` containing `tools`: the server tool needs tool calling, not provider-native search, because `engine: "auto"` falls back to Exa. Native search lives on the endpoint object as `native_tools["openrouter:web_search"]` and is only worth checking to predict which engine runs.
 
-Reference: [plugins](https://openrouter.ai/docs/guides/features/plugins)
+Search fees are billed in addition to token costs and are **not** capped by `provider.max_price`, so free models still incur search charges; `max_uses` bounds that exposure. Published rates per search request (up to 10 results included, then $0.001 per extra result; `max_results` defaults to 5, so our payload never pays the per-result surcharge):
+
+| Engine | Per-request fee |
+| --- | --- |
+| Exa `instant` / `fast` / `auto` (the default fallback) | $0.007 |
+| Exa `deep-lite` / `deep` | $0.012 |
+| Exa `deep-reasoning` | $0.015 |
+| Parallel `turbo` / `fast` | $0.001 |
+| Parallel `basic` / `advanced` | $0.005 |
+| Perplexity | $0.005 |
+| Firecrawl | $0.005 per search + $0.0125 per returned result |
+| Native (OpenAI, Anthropic, Google, Perplexity, SpaceXAI) | provider passthrough |
+
+Free models therefore always run on Exa: none of the 16 models in the live `:free` catalog exposes `native_tools["openrouter:web_search"]`, and with `engine: "auto"` (our payload omits `engine`) a model without native search falls back to Exa `auto` at $0.007 per search. Our cap is 3 searches per request, so **$0.021 is the exact per-request worst case**; a full catalog-wide run (15 tool-capable members plus the judge) tops out near $0.34. The legacy plugin docs state the same conclusion directly: "Using web search will incur extra costs, even with free models".
+
+The other server tools (`datetime`) and the remaining plugins (`file-parser` for PDF input, `response-healing`, an alternative to gap 3, and `context-compression`) are unused. Context compression is directly relevant to the judge failure that tells users to "try largest-context": it could let an ordinary judge digest a large council.
+
+References: [server tools](https://openrouter.ai/docs/guides/features/server-tools), [web search tool](https://openrouter.ai/docs/guides/features/server-tools/web-search), [legacy plugins](https://openrouter.ai/docs/guides/features/plugins)
 
 ### 10. Attribution headers
 

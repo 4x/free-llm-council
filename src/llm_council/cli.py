@@ -100,6 +100,17 @@ def parser() -> argparse.ArgumentParser:
     result.add_argument(
         "--judge-scope", choices=("free", "all"), help="Allow paid judges with 'all'"
     )
+    result.add_argument(
+        "--search-web",
+        dest="search_web",
+        action="store_true",
+        default=None,
+        help=(
+            "Let council members and the judge search the web server-side "
+            "(OpenRouter web_search tool / Gemini Google Search); searches are "
+            "billed on top of token costs, even for free models (overrides SEARCH_WEB)"
+        ),
+    )
     result.add_argument("--duckdb-path", help="DuckDB file (default: council.duckdb)")
     result.add_argument("--markdown-dir", help="Markdown root directory (default: council-output)")
     result.add_argument("--html-dir", help="HTML report directory (default: html-output)")

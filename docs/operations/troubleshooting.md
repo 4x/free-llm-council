@@ -35,6 +35,16 @@ EXCLUDED_MODELS=thinkingmachines/inkling-small:free
 
 Exclusions apply to members and judges, including routers and paid judges. There is no built-in blacklist; `DEBUG` logs show skipped models.
 
+## Web search problems
+
+`--search-web` / `SEARCH_WEB=1` adds OpenRouter's `openrouter:web_search` server tool (capped at 3 searches per request) to every member and judge call; `GEMINI_MODELS` use Google Search grounding instead.
+
+- **Unexpected cost.** Search fees are separate from token costs and are not covered by the free-model price cap, so free models still incur them. Free models have no native search, so `auto` runs Exa at $0.007 per search and our `max_uses: 3` caps a single request at $0.021; a model that skips searching adds nothing. `DEBUG` logs `Model X ran N web search(es)` from `usage.server_tool_use.web_search_requests`; turn `SEARCH_WEB` off or remove the models that search most. `usage.cost` in the raw response is the authoritative total actually debited, including search fees.
+- **Every member fails with `None of the N free text models supports the tool calling that --search-web requires`.** Discovery kept only models whose `supported_parameters` includes `tools`, and none qualified. Disable `SEARCH_WEB` or add Gemini models, which search through the Gemini API without needing OpenRouter tool support.
+- **`ConfigurationError` naming the judge.** An explicit judge that cannot call tools is rejected before member requests when search is on; choose a tool-capable judge, use an automatic strategy (which filters to tool-capable models), or disable `SEARCH_WEB`. An explicit model not found in the catalog at all is reported as an unknown judge instead.
+- **Answers arrive without fresh information.** The server tool is model-decided: a model may skip searching when it believes it already knows, and `engine: "auto"` prefers provider-native search before falling back to Exa. Check `web_search_requests` at `DEBUG` to see whether the model searched at all.
+- **Gemini grounding fails.** Google Search grounding is only available for supported Gemini models and can be region- or quota-restricted. The run reports the Gemini error unchanged; drop the model, or use OpenRouter-hosted models for that run.
+
 ## Judge fallback
 
 Normal behavior, not an error:

@@ -2,10 +2,13 @@
 
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass, field
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from typing import Any
+
+logger = logging.getLogger(__name__)
 
 TEXT_CHARGES = (
     "prompt",
@@ -48,6 +51,16 @@ def model_exclusion_reason(
     return None
 
 
+def supports_tools(model: dict[str, Any]) -> bool:
+    """Return whether the model advertises tool calling.
+
+    OpenRouter's server-side `openrouter:web_search` tool is written into the request's
+    `tools` array, so only models that accept tool calls can decide to search.
+    """
+    parameters = model.get("supported_parameters")
+    return isinstance(parameters, list) and "tools" in parameters
+
+
 def is_free_model(model: dict[str, Any]) -> bool:
     pricing = model.get("pricing") or {}
     if "prompt" not in pricing or "completion" not in pricing:
@@ -68,15 +81,22 @@ def council_models(
     catalog: list[dict[str, Any]],
     excluded_models: tuple[str, ...] = (),
     router_models: tuple[str, ...] = (),
+    require_tools: bool = False,
 ) -> list[dict[str, Any]]:
-    unique = {
-        model["id"]: model
-        for model in catalog
-        if isinstance(model.get("id"), str)
-        and model["id"] not in router_models
-        and model_exclusion_reason(model, excluded_models) is None
-        and is_free_model(model)
-    }
+    """Return free text models, optionally limited to tool-calling models."""
+    unique: dict[str, dict[str, Any]] = {}
+    for model in catalog:
+        model_id = model.get("id")
+        if not isinstance(model_id, str) or model_id in router_models:
+            continue
+        if model_exclusion_reason(model, excluded_models) is not None:
+            continue
+        if not is_free_model(model):
+            continue
+        if require_tools and not supports_tools(model):
+            logger.debug("Skipping model %s: tool calling not supported", model_id)
+            continue
+        unique[model_id] = model
     return [unique[key] for key in sorted(unique)]
 
 

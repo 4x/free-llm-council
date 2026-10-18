@@ -15,6 +15,22 @@ from dotenv import dotenv_values
 from .errors import ConfigurationError
 
 LOG_LEVELS = ("DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL")
+TRUE_STRINGS = frozenset({"1", "true", "yes", "on"})
+FALSE_STRINGS = frozenset({"0", "false", "no", "off"})
+
+
+def _parse_bool(name: str, value: Any) -> bool:
+    """Parse an environment-style boolean, rejecting ambiguous values."""
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, int) and value in {0, 1}:
+        return bool(value)
+    normalized = str(value).strip().lower()
+    if normalized in TRUE_STRINGS:
+        return True
+    if normalized in FALSE_STRINGS:
+        return False
+    raise ValueError(f"{name} must be a boolean (true/false, yes/no, 1/0)")
 
 
 class SaveMode(StrEnum):
@@ -65,6 +81,7 @@ class Settings:
     router_models: tuple[str, ...] = ()
 
     judge_scope: Literal["free", "all"] = "free"
+    search_web: bool = False
     max_concurrency: int = 3
     request_interval: float = 3.1
     timeout: float = 120.0
@@ -110,6 +127,7 @@ class Settings:
             "auto_router_model": "AUTO_ROUTER_MODEL",
             "router_models": "ROUTER_MODELS",
             "judge_scope": "JUDGE_SCOPE",
+            "search_web": "SEARCH_WEB",
             "max_concurrency": "MAX_CONCURRENCY",
             "request_interval": "REQUEST_INTERVAL",
             "timeout": "REQUEST_TIMEOUT",
@@ -166,6 +184,8 @@ class Settings:
             for key in ("request_interval", "timeout", "max_retry_wait"):
                 if key in converted:
                     converted[key] = float(converted[key])
+            if "search_web" in converted:
+                converted["search_web"] = _parse_bool("search_web", converted["search_web"])
             result = replace(self, **converted)
         except (ValueError, TypeError) as exc:
             raise ConfigurationError(f"Invalid configuration: {exc}") from exc

@@ -236,12 +236,33 @@ def query_result(
     logger.info("Starting council run %s; discovering free models", question_id)
     with OpenRouterClient(config) as client:
         catalog = client.list_models()
-        members = council_models(catalog, config.excluded_models, config.configured_routers)
-        if not members:
+        discovered = council_models(catalog, config.excluded_models, config.configured_routers)
+        members = (
+            discovered
+            if not config.search_web
+            else council_models(
+                catalog,
+                config.excluded_models,
+                config.configured_routers,
+                require_tools=True,
+            )
+        )
+        if not discovered:
             raise CouncilError("OpenRouter currently lists no free text model endpoints.")
+        if not members:
+            raise CouncilError(
+                f"None of the {len(discovered)} free text models supports the tool calling"
+                " that --search-web requires. Disable SEARCH_WEB or configure "
+                "GEMINI_MODELS for server-side Google Search."
+            )
         # Validate the judge before sending any member requests or writing files.
         judge_model, judge_free = select_judge(config, catalog, client)
-        logger.info("Discovered %d free models; judge: %s", len(members), judge_model)
+        logger.info(
+            "Discovered %d free models%s; judge: %s",
+            len(members),
+            ", server-side web search enabled" if config.search_web else "",
+            judge_model,
+        )
         if on_event is not None:
             on_event(
                 {
@@ -266,7 +287,12 @@ def query_result(
                 logger.debug("Querying council member %s", model_id)
                 try:
                     messages = [*history, {"role": "user", "content": text}]
-                    answer = client.complete(model_id, messages, free_only=True)
+                    answer = client.complete(
+                        model_id,
+                        messages,
+                        free_only=True,
+                        search_web=config.search_web,
+                    )
                     logger.info("Received answer from %s", answer.model)
                     return answer
                 except OpenRouterError as exc:
@@ -356,7 +382,12 @@ def query_result(
                         *history,
                         {"role": "user", "content": judge_input},
                     ]
-                    synthesis = client.complete(candidate, messages, free_only=candidate_free)
+                    synthesis = client.complete(
+                        candidate,
+                        messages,
+                        free_only=candidate_free,
+                        search_web=config.search_web,
+                    )
                     used_judge = candidate
                     break
                 except OpenRouterError as exc:
@@ -455,7 +486,12 @@ def improve_prompt(
         members = council_models(catalog, config.excluded_models, config.configured_routers)
         if not members and config.judge_scope == "free":
             raise CouncilError("OpenRouter currently lists no free text model endpoints.")
-        selected_model, is_free = select_judge(config, catalog, client)
+        # Prompt rewriting does not search, so do not let --search-web narrow candidates here.
+        selected_model, is_free = select_judge(
+            config.with_overrides(search_web=False) if config.search_web else config,
+            catalog,
+            client,
+        )
         candidates: list[tuple[str, bool]] = [(selected_model, is_free)]
         candidates.extend(
             (member["id"], True) for member in members if member["id"] != selected_model

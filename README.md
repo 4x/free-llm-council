@@ -86,6 +86,7 @@ uv run llm-council --file path/to/prompt.md --save-synthesis duckdb
 uv run llm-council -q "Compare Bayesian and frequentist inference" --judge largest-context \
   --save-prompt both --save-initial-answers both --save-synthesis both
 uv run llm-council -q "Explain entropy" --no-save
+uv run llm-council -q "What shipped in the latest Rust release?" --search-web
 uv run llm-council --followup "provide more details about that last security caveat" --copy
 uv run llm-council --export-markdown
 uv run llm-council --export-html
@@ -103,7 +104,7 @@ the local HTML web interface.
 ### Web UI (`--web` / `--serve`)
 
 `uv run llm-council --web` (or `--web --open-browser`, or the root `launch-web.cmd` / `launch-web.ps1` launchers) starts a local HTTP/SSE workspace on `http://127.0.0.1:8765` with:
-- A prominent prompt composer with `<New>`, `<Followup>`, `<Clear>` (clears the prompt textbox), and red `<Stop>` (disabled/grayed out unless an active LLM retrieval is in progress) buttons with hover tooltips, a paperclip file attachment button (`📎 Attach file`), a Judge Criterion selector (all built-in strategies plus custom model slug), and a one-click `✨ Improve Prompt` drawer.
+- A prominent prompt composer with `<New>`, `<Followup>`, `<Clear>` (clears the prompt textbox), and red `<Stop>` (disabled/grayed out unless an active LLM retrieval is in progress) buttons with hover tooltips, a paperclip file attachment button (`📎 Attach file`), a Judge Criterion selector (all built-in strategies plus custom model slug), a `🌐 Web search` checkbox that enables server-side search per run (defaults to the server's `SEARCH_WEB` setting), and a one-click `✨ Improve Prompt` drawer.
 - Real-time Server-Sent Events (SSE) streaming of council member answers as each model finishes, followed by the synthesized response and pagination pills (`Prompt`, `Synthesis`, numbered member tabs, `Prev`/`Next`, and `All Answers`).
 - KaTeX typesetting of LaTeX in answers and syntheses. Inline `$...$` and `\(...\)` render inline; `$$...$$` and `\[...\]` render as centered display equations that scroll horizontally when they are wider than the card. Math inside fenced or inline code stays literal, as do currency amounts like `$5` and escaped `\$`.
 - Left-hand conversation history panel separating **Current Session** runs from **Saved in DuckDB** runs (rendered less prominently). Selecting any historical run populates its prompt and stored answers/synthesis (subject to availability), and clicking `<Followup>` while a conversation is selected follows up directly on that conversation.
@@ -196,6 +197,7 @@ against the current working directory. `--env-file` / `env_file=` selects anothe
 | `HTML_DIR` | `html_dir` / `--html-dir` | `html-output` |
 | `JUDGE` | `judge` / `--judge` | `random` |
 | `JUDGE_SCOPE` | `judge_scope` / `--judge-scope` | `free` |
+| `SEARCH_WEB` | `search_web` / `--search-web` | `false`; let members and the judge run server-side web search (paid per search, even on free models) |
 | `JUDGE_PROMPT` | `judge_prompt` / `--judge-prompt` | unset (built-in backup) |
 | `FREE_ROUTER_MODEL` | `free_router_model` (Python only) | empty; required for `free-router` |
 | `AUTO_ROUTER_MODEL` | `auto_router_model` (Python only) | empty; required for `auto` |
@@ -374,6 +376,10 @@ any model that already errored). This avoids repeating a known-failing endpoint.
   optional request, reasoning, and cache charges if present, and rejects conditional pricing
   overrides.
   Non-text models and configured routers are not council members. No `:free` suffix is fabricated.
+- Server-side web search is opt-in with `--search-web` / `SEARCH_WEB=1` (Python `search_web=True`). OpenRouter receives `tools: [{"type": "openrouter:web_search", "parameters": {"max_uses": 3}}]`; the model decides whether to search, so a request may run 0–3 searches, and `usage.server_tool_use.web_search_requests` records how many ran (logged at `DEBUG`). This is the current server-tool form: the older `plugins: [{id: "web"}]` and `:online` suffix are deprecated. **Search charges are billed on top of token costs and are not covered by the free-model price cap (`provider.max_price`), so a free model is not a free search.** Cap: 3 searches per member/judge request (`WEB_SEARCH_MAX_USES`).
+- Search cost is per search request, not per token: none of the live free models has native search, so `engine: "auto"` runs Exa `auto` at **$0.007 per search** (up to 10 results included; our default `max_results` of 5 never triggers the $0.001 per-extra-result fee). At the 3-search cap that is **$0.021 per request worst case**, and a model that decides not to search costs nothing extra. The [capability reference](docs/reference/openrouter-api-capabilities.md#9-server-tools-web-search-adopted-the-rest-unused) lists every engine's rate.
+- Discovery for search picks council members that advertise tool calling (`supported_parameters` contains `tools`), because the server tool is invoked through the `tools` array; it does **not** require provider-native search, since `engine: "auto"` falls back to Exa. Native search is exposed per endpoint as `native_tools["openrouter:web_search"]` and only affects which engine runs. In the live free catalog 15 of 16 text models support tools (only `nvidia/nemotron-3.5-content-safety:free` does not); the rest are skipped when `SEARCH_WEB` is on.
+- The judge is included: automatic strategies (`random`, `round-robin`, `most-intelligent`, `largest-context`) only consider tool-capable models when `SEARCH_WEB` is on, an explicit judge that cannot call tools is rejected before any member request, and configured router judges (`free-router`, `auto`) are left to OpenRouter's routing. `GEMINI_MODELS` are searched through the Gemini API's Google Search grounding tool (`types.Tool(google_search=...)`) instead of OpenRouter; `--improve` never searches.
 - Restricted/harness-only endpoints must be configured in `EXCLUDED_MODELS`; there is no built-in ID blacklist. The example environment recommends `thinkingmachines/inkling-small:free` because it returned a harness-only 403 for this workflow. Tool support and agentic scores alone do not establish access restrictions.
 - Configure unavailable/restricted endpoints via comma-separated `EXCLUDED_MODELS` in your local environment file, `--excluded-models provider/model:free,provider/other:free`, or Python `excluded_models=("provider/model:free",)`. Exclusions apply to members and judges, including configured routers and paid judges; explicit excluded judges are rejected before member calls. Overrides replace the entire list. DEBUG logs explain skipped models. OpenRouter's `auto`/`free-router` judges choose their underlying model
   server-side, so local exclusions cannot constrain those router decisions; use a

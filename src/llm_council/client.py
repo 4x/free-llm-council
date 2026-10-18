@@ -26,6 +26,19 @@ logger = logging.getLogger(__name__)
 # attributed to reasoning; below it, more budget mainly buys visible answer text.
 REASONING_DOMINATED_SHARE = 0.5
 GEMINI_DEFAULT_CONTEXT_LENGTH = 1_048_576
+# OpenRouter's server-side web search tool (the `web` plugin and `:online` are deprecated).
+# The model decides whether to search; max_uses bounds search spend per request because
+# every search is billed on top of token costs, including for free models.
+WEB_SEARCH_TOOL_TYPE = "openrouter:web_search"
+WEB_SEARCH_MAX_USES = 3
+
+
+def _web_search_tool() -> dict[str, Any]:
+    """Build the server tool entry that enables OpenRouter-run web search."""
+    return {
+        "type": WEB_SEARCH_TOOL_TYPE,
+        "parameters": {"max_uses": WEB_SEARCH_MAX_USES},
+    }
 
 
 def _token_count(value: Any) -> int | None:
@@ -392,6 +405,10 @@ class OpenRouterClient:
     def _is_gemini_model(self, model: str) -> bool:
         return self._match_configured_gemini_id(model) is not None
 
+    def is_gemini_model(self, model: str) -> bool:
+        """Return whether the model ID is served directly through the Gemini API."""
+        return self._is_gemini_model(model)
+
     @staticmethod
     def _gemini_usage_dict(usage_metadata: Any) -> dict[str, Any]:
         if usage_metadata is None:
@@ -425,7 +442,9 @@ class OpenRouterClient:
             )
         return usage
 
-    def _complete_gemini(self, model: str, messages: list[dict[str, str]]) -> ModelAnswer:
+    def _complete_gemini(
+        self, model: str, messages: list[dict[str, str]], *, search_web: bool = False
+    ) -> ModelAnswer:
         if self.gemini is None:
             raise OpenRouterError(f"GEMINI_API_KEY is required to call Gemini model {model!r}.")
         from google.genai import errors as genai_errors
@@ -452,6 +471,8 @@ class OpenRouterClient:
             config_kwargs["system_instruction"] = "\n\n".join(system_parts)
         if self.settings.max_tokens > 0:
             config_kwargs["max_output_tokens"] = self.settings.max_tokens
+        if search_web:
+            config_kwargs["tools"] = [genai_types.Tool(google_search=genai_types.GoogleSearch())]
         gen_config = genai_types.GenerateContentConfig(**config_kwargs) if config_kwargs else None
 
         if not system_parts and not contents:
@@ -536,10 +557,16 @@ class OpenRouterClient:
         raise AssertionError("Retry loop must return or raise")
 
     def complete(
-        self, model: str, messages: list[dict[str, str]], *, free_only: bool = False
+        self,
+        model: str,
+        messages: list[dict[str, str]],
+        *,
+        free_only: bool = False,
+        search_web: bool = False,
     ) -> ModelAnswer:
+        """Answer with one model, optionally enabling server-side web search."""
         if self._is_gemini_model(model):
-            return self._complete_gemini(model, messages)
+            return self._complete_gemini(model, messages, search_web=search_web)
         body: dict[str, Any] = {
             "model": model,
             "messages": messages,
@@ -550,6 +577,9 @@ class OpenRouterClient:
         if free_only:
             # Protect against pricing changes between discovery and generation, including routers.
             body["provider"] = {"max_price": {"prompt": 0, "completion": 0}}
+        if search_web:
+            # Search charges are billed separately and are not capped by provider.max_price.
+            body["tools"] = [_web_search_tool()]
         payload = self._request("POST", "chat/completions", json=body)
         choices = payload.get("choices")
         if not isinstance(choices, list) or not choices or not isinstance(choices[0], dict):
@@ -575,9 +605,15 @@ class OpenRouterClient:
         if not isinstance(content, str) or not content.strip():
             raise OpenRouterError(f"Model {model} returned no text answer.")
         actual_model = payload.get("model")
+        usage_dict = usage if isinstance(usage, dict) else {}
+        server_tool_use = usage_dict.get("server_tool_use")
+        if search_web and isinstance(server_tool_use, dict):
+            logger.debug(
+                "Model %s ran %s web search(es)", model, server_tool_use.get("web_search_requests")
+            )
         return ModelAnswer(
             requested_model=model,
             model=actual_model if isinstance(actual_model, str) else model,
             content=content,
-            usage=usage if isinstance(usage, dict) else {},
+            usage=usage_dict,
         )

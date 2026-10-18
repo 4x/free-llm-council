@@ -63,6 +63,8 @@ def test_web_index_serves_required_ui_elements(web_url):
     assert 'id="attach-file-btn"' in html
     assert "📎" in html
     assert 'id="judge-select"' in html
+    assert 'id="search-web-checkbox"' in html
+    assert 'id="search-web-toggle"' in html
     assert 'id="pagination-bar"' in html
     assert 'id="session-history-list"' in html
     assert 'id="db-history-list"' in html
@@ -127,6 +129,49 @@ def test_web_query_streams_member_answers_then_synthesis(router, web_url):
         router.calls[0]["messages"][0]["content"]
         == "Explain quantum tunneling\n\nInclude WKB approximation"
     )
+
+
+def test_web_config_reports_search_web_default(web_url):
+    """GET /api/config exposes the server's web-search default for the checkbox."""
+    with urlopen(f"{web_url}/api/config", timeout=5) as cfg_resp:
+        cfg = json.loads(cfg_resp.read().decode("utf-8"))
+    assert cfg["search_web"] is False
+
+
+def test_web_query_search_web_adds_server_tools_to_every_call(router, web_url):
+    """POST /api/query with search_web sends OpenRouter's web search tool."""
+    for entry in router.catalog:
+        entry["supported_parameters"] = ["tools"]
+    req = Request(
+        f"{web_url}/api/query",
+        data=json.dumps(
+            {"prompt": "What happened today?", "judge": "test/beta:free", "search_web": True}
+        ).encode("utf-8"),
+        headers={"Content-Type": "application/json"},
+        method="POST",
+    )
+    with urlopen(req, timeout=10) as resp:
+        events = _parse_sse(resp.read().decode("utf-8"))
+
+    assert events[-1]["type"] == "synthesis"
+    assert len(router.calls) == 3
+    assert all(
+        call["tools"] == [{"type": "openrouter:web_search", "parameters": {"max_uses": 3}}]
+        for call in router.calls
+    )
+
+
+def test_web_query_rejects_non_boolean_search_web(web_url):
+    """POST /api/query validates the search_web checkbox payload."""
+    req = Request(
+        f"{web_url}/api/query",
+        data=json.dumps({"prompt": "Question", "search_web": "yes"}).encode("utf-8"),
+        headers={"Content-Type": "application/json"},
+        method="POST",
+    )
+    with pytest.raises(HTTPError) as exc_info:
+        urlopen(req, timeout=5)
+    assert exc_info.value.code == 400
 
 
 def test_web_query_followup_attaches_selected_conversation_context(router, web_url):
