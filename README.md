@@ -200,6 +200,13 @@ Once written, the Web UI and HTML reports show the reconciled values in place: n
 and completion counts appear in the token pill tooltip, and a nonzero upstream cost adds an
 `upstream $...` pill alongside the router cost.
 
+The Web UI's History panel can run the same pass with **⟳ Reconcile accounting**. That action is
+bounded to the newest 25 answers per click so one browser request cannot hold the connection open
+for an entire backlog; each click reports how many answers were updated, pruned, or failed, grouped
+by the run they belong to, then reloads DuckDB so the open conversation's pills update immediately.
+Repeated clicks continue with the remaining answers, and the action is disabled while a council
+run is streaming because DuckDB allows one writer.
+
 ## Configuration
 
 Copy [.env.example](.env.example) to `.env` in the **current working directory**.

@@ -110,6 +110,8 @@ def test_reconcile_merges_native_tokens_and_upstream_cost(settings, router):
 
     assert report.updated_count == 1
     assert report.failures == ()
+    # Callers (the Web History panel) group outcomes by owning run.
+    assert report.items[0].question_id == "q1"
     assert "Reconciled 1 of 1" in report.summary()
     usage = stored_usage(settings)
     assert usage[GENERATION_USAGE_KEY] == UPSTREAM_DATA

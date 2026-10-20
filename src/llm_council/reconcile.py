@@ -46,6 +46,8 @@ class ReconcileItem:
     """One stored answer's reconciliation result."""
 
     response_id: str
+    # Owning run, so callers can summarize outcomes per stored conversation.
+    question_id: str
     model: str
     generation_id: str
     outcome: ReconcileOutcome
@@ -117,6 +119,7 @@ def _reconcile_rows(
     updates: list[tuple[str, dict[str, Any]]] = []
     for row in pending:
         response_id = str(row["response_id"])
+        question_id = str(row["question_id"])
         generation_id = str(row["generation_id"])
         model = str(row["model"])
         try:
@@ -134,17 +137,31 @@ def _reconcile_rows(
                 updates.append((response_id, unavailable))
                 items.append(
                     ReconcileItem(
-                        response_id, model, generation_id, ReconcileOutcome.UNAVAILABLE, str(exc)
+                        response_id,
+                        question_id,
+                        model,
+                        generation_id,
+                        ReconcileOutcome.UNAVAILABLE,
+                        str(exc),
                     )
                 )
                 continue
             logger.error("Cannot reconcile generation %s for %s: %s", generation_id, model, exc)
             items.append(
-                ReconcileItem(response_id, model, generation_id, ReconcileOutcome.FAILED, str(exc))
+                ReconcileItem(
+                    response_id,
+                    question_id,
+                    model,
+                    generation_id,
+                    ReconcileOutcome.FAILED,
+                    str(exc),
+                )
             )
             continue
         updates.append((response_id, _merge_generation_usage(row["usage"], data, reconciled_at)))
-        items.append(ReconcileItem(response_id, model, generation_id, ReconcileOutcome.UPDATED))
+        items.append(
+            ReconcileItem(response_id, question_id, model, generation_id, ReconcileOutcome.UPDATED)
+        )
         logger.debug(
             "Reconciled generation %s for %s: native prompt=%s, completion=%s, upstream cost=%s",
             generation_id,

@@ -110,6 +110,12 @@ Symptom: the pass prints rows under the summary and exits with status 1.
 - `No stored answers are awaiting reconciliation; N have no generation ID` means the stored rows predate metadata capture or came from Gemini. There is nothing to fetch; native counts for those runs cannot be recovered.
 - `DuckDB file ... does not exist` means the run history lives elsewhere; point `--duckdb-path`/`DUCKDB_PATH` at the right file.
 
+The History panel's **⟳ Reconcile accounting** button runs the same pass and shows the outcome under it, grouped per stored run. Three behaviours differ from the CLI:
+
+- Only the newest 25 answers are fetched per click, so a long backlog needs repeated clicks. Each click re-selects only answers that still lack reconciled usage, so repeating it never re-fetches a finished row.
+- The button is disabled while a council query is streaming, and a click during a run is refused with `Wait for the current council run to finish`. Reconcile after the run completes.
+- `Reconcile limit must be between 1 and 200` means a client sent an explicit out-of-range `limit`; the panel itself always sends the server's default. No configuration is required.
+
 ## DuckDB locked / missing tables
 
 - Do not run concurrent writer processes against the same DuckDB file; use separate files or serialize runs.

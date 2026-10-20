@@ -19,6 +19,7 @@ from .config import Settings
 from .council import improve_prompt, query_result
 from .errors import CouncilError
 from .judges import STRATEGIES
+from .reconcile import ReconcileReport, reconcile_generations
 from .storage import load_history
 
 logger = logging.getLogger("llm_council")
@@ -26,6 +27,11 @@ logger = logging.getLogger("llm_council")
 DEFAULT_WEB_HOST = "127.0.0.1"
 DEFAULT_WEB_PORT = 8765
 MAX_REQUEST_BYTES = 10 * 1024 * 1024
+
+# Reconciling costs one upstream request per answer, so the History panel action
+# stays bounded instead of holding one browser request open for the whole backlog.
+WEB_RECONCILE_LIMIT = 25
+WEB_RECONCILE_MAX_LIMIT = 200
 
 # Vendored browser assets (KaTeX, used to typeset LaTeX in council answers).
 STATIC_DIR = Path(__file__).resolve().parent / "static"
@@ -286,6 +292,100 @@ _UI_HTML = r"""<!doctype html>
     color: var(--green);
     border-color: rgba(63, 185, 80, 0.35);
     background: var(--green-soft);
+  }
+
+  /* Reconciliation action and per-run outcome summary */
+  .db-reconcile-row {
+    display: flex;
+    padding: 0 8px 8px;
+  }
+
+  .btn-compact {
+    width: 100%;
+    padding: 6px 10px;
+    font-size: 11.5px;
+    font-weight: 600;
+  }
+
+  .reconcile-summary {
+    margin: 0 8px 10px;
+    padding: 8px 10px;
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    background: var(--bg-elev);
+    font-size: 11.5px;
+    color: var(--text-muted);
+    max-height: 240px;
+    overflow-y: auto;
+  }
+
+  .reconcile-summary.error {
+    border-color: rgba(248, 81, 73, 0.5);
+    background: var(--red-soft);
+  }
+
+  .reconcile-summary-head {
+    color: var(--text);
+    line-height: 1.45;
+    overflow-wrap: anywhere;
+  }
+
+  .reconcile-summary.error .reconcile-summary-head {
+    color: var(--red);
+  }
+
+  .reconcile-run {
+    margin-top: 7px;
+    padding-top: 7px;
+    border-top: 1px solid var(--border);
+  }
+
+  .reconcile-run-title {
+    color: var(--text);
+    font-size: 12px;
+    overflow-wrap: anywhere;
+  }
+
+  .reconcile-outcomes {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 4px;
+    margin-top: 5px;
+  }
+
+  .outcome {
+    font-family: var(--mono);
+    font-size: 10px;
+    padding: 1px 6px;
+    border-radius: 999px;
+    border: 1px solid var(--border);
+    color: var(--text-muted);
+  }
+
+  .outcome.updated {
+    color: var(--green);
+    border-color: rgba(63, 185, 80, 0.35);
+    background: var(--green-soft);
+  }
+
+  .outcome.unavailable {
+    color: var(--amber);
+    border-color: rgba(210, 153, 34, 0.35);
+    background: var(--amber-soft);
+  }
+
+  .outcome.failed {
+    color: var(--red);
+    border-color: rgba(248, 81, 73, 0.35);
+    background: var(--red-soft);
+  }
+
+  .reconcile-detail {
+    margin-top: 5px;
+    font-family: var(--mono);
+    font-size: 10.5px;
+    color: var(--text-dim);
+    overflow-wrap: anywhere;
   }
 
   .empty-history {
@@ -1118,6 +1218,22 @@ _UI_HTML = r"""<!doctype html>
         <span>Saved in DuckDB</span>
         <span id="db-count-label">0</span>
       </div>
+      <div class="db-reconcile-row">
+        <button
+          id="reconcile-btn"
+          type="button"
+          class="btn btn-secondary btn-compact"
+          title="Fetch exact native token counts and upstream BYOK cost from OpenRouter GET /generation for stored answers, newest first. Answers without a generation ID are skipped."
+        >
+          ⟳ Reconcile accounting
+        </button>
+      </div>
+      <div
+        id="reconcile-summary"
+        class="reconcile-summary"
+        aria-live="polite"
+        style="display: none;"
+      ></div>
       <div id="db-history-list" class="history-list" role="list"></div>
     </div>
   </aside>
@@ -1275,6 +1391,8 @@ _UI_HTML = r"""<!doctype html>
     activeAbortController: null,
     activePage: "synthesis", // "synthesis" | "all" | number (0-based answer index)
     filterText: "",
+    isReconciling: false,
+    reconcileLimit: 25, // Overwritten by GET /api/config
   };
 
   const promptInput = document.getElementById("prompt-input");
@@ -1298,6 +1416,8 @@ _UI_HTML = r"""<!doctype html>
   const dbListEl = document.getElementById("db-history-list");
   const sessionCountLabel = document.getElementById("session-count-label");
   const dbCountLabel = document.getElementById("db-count-label");
+  const reconcileBtn = document.getElementById("reconcile-btn");
+  const reconcileSummaryEl = document.getElementById("reconcile-summary");
   const historyCountBadge = document.getElementById("history-count-badge");
   const historyFilterInput = document.getElementById("history-filter-input");
   const statusBanner = document.getElementById("status-banner");
@@ -1328,6 +1448,8 @@ _UI_HTML = r"""<!doctype html>
     const canFollowup = Boolean(selected && selected.synthesis && !state.isRunning);
     followupBtn.disabled = !canFollowup;
     stopBtn.disabled = !state.isRunning;
+    // DuckDB allows one writer, so reconciliation waits for a streaming run to end.
+    reconcileBtn.disabled = state.isRunning || state.isReconciling;
 
     if (selected && selected.synthesis) {
       const snippet = (selected.prompt || "Selected run").slice(0, 44);
@@ -1439,6 +1561,122 @@ _UI_HTML = r"""<!doctype html>
         selectRun(runId, { populatePrompt: true });
       });
     });
+  }
+
+  function reconcileRunLabel(runId) {
+    const run = findRunById(runId);
+    const prompt = run && typeof run.prompt === "string" ? run.prompt.trim() : "";
+    if (!prompt) return "Run " + runId;
+    return prompt.length > 90 ? prompt.slice(0, 90) + "…" : prompt;
+  }
+
+  function renderReconcileSummary(payload) {
+    const items = Array.isArray(payload.items) ? payload.items : [];
+    const groups = [];
+    const byRun = new Map();
+    items.forEach(item => {
+      const runId = String(item.run_id || item.response_id || "");
+      let group = byRun.get(runId);
+      if (!group) {
+        group = { runId: runId, counts: { updated: 0, unavailable: 0, failed: 0 }, details: [] };
+        byRun.set(runId, group);
+        groups.push(group);
+      }
+      const outcome = ["updated", "unavailable", "failed"].includes(item.outcome) ? item.outcome : "failed";
+      group.counts[outcome] += 1;
+      if (outcome !== "updated") {
+        const detail = typeof item.detail === "string" && item.detail ? item.detail : "No detail recorded.";
+        group.details.push((item.model || "unknown model") + ": " + detail);
+      }
+    });
+
+    const parts = [
+      `<div class="reconcile-summary-head">${escapeHtml(payload.summary || "Reconciliation complete.")}</div>`,
+    ];
+    groups.forEach(group => {
+      const chips = ["updated", "unavailable", "failed"]
+        .filter(outcome => group.counts[outcome] > 0)
+        .map(outcome => `<span class="outcome ${outcome}">${group.counts[outcome]} ${outcome}</span>`)
+        .join("");
+      const details = group.details
+        .map(detail => `<div class="reconcile-detail">${escapeHtml(detail)}</div>`)
+        .join("");
+      parts.push(`
+        <div class="reconcile-run">
+          <div class="reconcile-run-title">${escapeHtml(reconcileRunLabel(group.runId))}</div>
+          <div class="reconcile-outcomes">${chips}</div>
+          ${details}
+        </div>
+      `);
+    });
+
+    reconcileSummaryEl.className = "reconcile-summary";
+    reconcileSummaryEl.style.display = "block";
+    reconcileSummaryEl.innerHTML = parts.join("");
+  }
+
+  function renderReconcileError(message) {
+    reconcileSummaryEl.className = "reconcile-summary error";
+    reconcileSummaryEl.style.display = "block";
+    reconcileSummaryEl.innerHTML =
+      '<div class="reconcile-summary-head">⚠️ ' + escapeHtml(String(message)) + "</div>";
+  }
+
+  async function refreshDbHistory() {
+    try {
+      const resp = await fetch("/api/history");
+      if (!resp.ok) return false;
+      const data = await resp.json();
+      state.dbRuns = Array.isArray(data.history) ? data.history : [];
+    } catch (_) {
+      return false;
+    }
+    renderHistorySidebar();
+    // Re-render the open run so its pills pick up the newly reconciled accounting.
+    if (state.selectedRunId) renderWorkspace();
+    return true;
+  }
+
+  async function runReconciliation() {
+    if (state.isReconciling) return;
+    if (state.isRunning) {
+      renderReconcileError("Wait for the current council run to finish before reconciling stored answers.");
+      return;
+    }
+    state.isReconciling = true;
+    const idleLabel = reconcileBtn.textContent;
+    reconcileBtn.disabled = true;
+    reconcileBtn.textContent = "Reconciling…";
+    reconcileSummaryEl.className = "reconcile-summary";
+    reconcileSummaryEl.style.display = "block";
+    reconcileSummaryEl.innerHTML =
+      '<div class="reconcile-summary-head">Fetching generation accounting from OpenRouter…</div>';
+    try {
+      const resp = await fetch("/api/reconcile", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ limit: state.reconcileLimit }),
+      });
+      const payload = await resp.json().catch(() => ({}));
+      if (!resp.ok) {
+        renderReconcileError(payload.error || `Reconciliation failed (HTTP ${resp.status}).`);
+        return;
+      }
+      renderReconcileSummary(payload);
+      if (!(await refreshDbHistory())) {
+        renderReconcileError(
+          "Accounting was fetched, but reloading DuckDB history failed. Refresh the page to see it."
+        );
+      }
+    } catch (err) {
+      renderReconcileError(
+        "Reconciliation request failed: " + (err && err.message ? err.message : String(err))
+      );
+    } finally {
+      state.isReconciling = false;
+      reconcileBtn.textContent = idleLabel;
+      reconcileBtn.disabled = state.isRunning;
+    }
   }
 
   function selectRun(runId, opts) {
@@ -2180,6 +2418,13 @@ _UI_HTML = r"""<!doctype html>
         if (typeof cfg.search_web === "boolean") {
           searchWebCheckbox.checked = cfg.search_web;
         }
+        if (typeof cfg.reconcile_limit === "number" && cfg.reconcile_limit > 0) {
+          state.reconcileLimit = cfg.reconcile_limit;
+          reconcileBtn.title =
+            "Fetch exact native token counts and upstream BYOK cost from OpenRouter GET /generation " +
+            "for stored answers, newest first, up to " + cfg.reconcile_limit +
+            " answers per click. Answers without a generation ID are skipped.";
+        }
         if (cfg.judge) {
           const builtIns = ["random", "round-robin", "most-intelligent", "largest-context", "free-router", "auto"];
           if (builtIns.includes(cfg.judge)) {
@@ -2257,6 +2502,10 @@ _UI_HTML = r"""<!doctype html>
     requestPromptImprovements();
   });
 
+  reconcileBtn.addEventListener("click", function() {
+    runReconciliation();
+  });
+
   closeImproveBtn.addEventListener("click", function() {
     improveDrawer.classList.remove("open");
   });
@@ -2295,6 +2544,32 @@ def _combine_prompt_and_attachment(
     if clean_prompt and clean_file:
         return f"{clean_prompt}\n\n{clean_file}"
     return clean_prompt or clean_file
+
+
+def _reconcile_payload(report: ReconcileReport) -> dict[str, Any]:
+    """Serialize one reconciliation pass for the History panel.
+
+    Items carry the owning run so the panel can group outcomes per conversation
+    instead of showing one undifferentiated list of answers.
+    """
+    return {
+        "summary": report.summary(),
+        "updated": report.updated_count,
+        "unavailable": report.unavailable_count,
+        "failed": len(report.failures),
+        "without_generation_id": report.without_generation_id,
+        "items": [
+            {
+                "run_id": item.question_id,
+                "response_id": item.response_id,
+                "model": item.model,
+                "generation_id": item.generation_id,
+                "outcome": item.outcome.value,
+                "detail": item.detail,
+            }
+            for item in report.items
+        ],
+    }
 
 
 def create_web_server(
@@ -2391,6 +2666,7 @@ def create_web_server(
                         "save_initial_answers": base_settings.save_initial_answers.value,
                         "save_synthesis": base_settings.save_synthesis.value,
                         "search_web": base_settings.search_web,
+                        "reconcile_limit": WEB_RECONCILE_LIMIT,
                         "time_zone": os.environ.get("TIME_ZONE"),
                     }
                 )
@@ -2410,6 +2686,31 @@ def create_web_server(
 
         def do_POST(self) -> None:
             parsed_url = urlparse(self.path)
+            if parsed_url.path == "/api/reconcile":
+                try:
+                    body = self._read_json_body()
+                    raw_limit = body.get("limit", WEB_RECONCILE_LIMIT)
+                    if isinstance(raw_limit, bool) or not isinstance(raw_limit, int):
+                        raise CouncilError(
+                            "Reconcile limit must be an integer number of stored answers."
+                        )
+                    if not 1 <= raw_limit <= WEB_RECONCILE_MAX_LIMIT:
+                        raise CouncilError(
+                            f"Reconcile limit must be between 1 and {WEB_RECONCILE_MAX_LIMIT}."
+                        )
+                    report = reconcile_generations(settings=base_settings, limit=raw_limit)
+                    self._send_json(_reconcile_payload(report))
+                except CouncilError as exc:
+                    logger.warning("Web reconciliation error: %s", exc)
+                    self._send_json({"error": str(exc)}, status=HTTPStatus.BAD_REQUEST)
+                except Exception as exc:
+                    logger.error("Unexpected error in /api/reconcile: %s", exc)
+                    self._send_json(
+                        {"error": f"Unexpected server error: {exc}"},
+                        status=HTTPStatus.INTERNAL_SERVER_ERROR,
+                    )
+                return
+
             if parsed_url.path == "/api/improve":
                 try:
                     body = self._read_json_body()

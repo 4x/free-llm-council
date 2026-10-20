@@ -18,6 +18,7 @@ from llm_council import (
     query_result,
     reconcile_generations,
 )
+from llm_council.web import WEB_RECONCILE_LIMIT
 
 
 @pytest.fixture()
@@ -82,6 +83,12 @@ def test_web_index_serves_required_ui_elements(web_url):
     assert "cache discount" in html
     assert "citations-strip" in html
     assert "meta-pill" in html
+    # The History panel can drive reconciliation and group outcomes per run.
+    assert 'id="reconcile-btn"' in html
+    assert 'id="reconcile-summary"' in html
+    assert "function renderReconcileSummary(payload)" in html
+    assert "function runReconciliation()" in html
+    assert '"/api/reconcile"' in html
 
 
 def test_web_config_and_history_endpoints(config, router, web_url):
@@ -143,6 +150,94 @@ def test_web_history_exposes_reconciled_generation_accounting(config, router, we
     assert all(usage["generation"]["upstream_inference_cost"] == 0.0021 for usage in usages)
 
 
+def _post_reconcile(web_url: str, body: dict | None = None) -> tuple[int, dict]:
+    """POST /api/reconcile and return the status plus decoded payload (or error)."""
+    req = Request(
+        f"{web_url}/api/reconcile",
+        data=json.dumps(body or {}).encode("utf-8"),
+        headers={"Content-Type": "application/json"},
+        method="POST",
+    )
+    try:
+        with urlopen(req, timeout=15) as resp:
+            return resp.status, json.loads(resp.read().decode("utf-8"))
+    except HTTPError as exc:
+        return exc.code, json.loads(exc.read().decode("utf-8"))
+
+
+def _store_member_answers(config, prompt: str = "Reconcile from the panel") -> None:
+    """Persist a run whose two member answers carry fixture generation IDs."""
+    query_result(
+        prompt,
+        settings=config,
+        save_prompt="duckdb",
+        save_initial_answers="duckdb",
+        save_synthesis="none",
+    )
+
+
+def test_web_reconcile_endpoint_reconciles_and_summarizes_per_run(config, router, web_url):
+    """POST /api/reconcile fetches accounting, groups outcomes by run, and refreshes history."""
+    _store_member_answers(config)
+    for model_id in ("test/alpha:free", "test/beta:free"):
+        generation_id = f"gen-fixture-{model_id}"
+        router.generations[generation_id] = {
+            "id": generation_id,
+            "model": model_id,
+            "native_tokens_prompt": 39,
+            "native_tokens_completion": 158,
+            "upstream_inference_cost": 0.0021,
+        }
+
+    status, payload = _post_reconcile(web_url)
+
+    assert status == 200
+    assert payload["updated"] == 2
+    assert payload["unavailable"] == 0
+    assert payload["failed"] == 0
+    assert "Reconciled 2 of 2" in payload["summary"]
+    assert len(payload["items"]) == 2
+    run_ids = {item["run_id"] for item in payload["items"]}
+    assert len(run_ids) == 1
+    assert all(item["outcome"] == "updated" for item in payload["items"])
+    assert {item["model"] for item in payload["items"]} == {
+        "test/alpha:free",
+        "test/beta:free",
+    }
+
+    with urlopen(f"{web_url}/api/history", timeout=5) as hist_resp:
+        entry = json.loads(hist_resp.read().decode("utf-8"))["history"][0]
+    assert all(
+        answer["usage"]["generation"]["native_tokens_prompt"] == 39 for answer in entry["answers"]
+    )
+
+
+def test_web_reconcile_endpoint_reports_unavailable_and_failed_answers(config, router, web_url):
+    """A pruned generation and a transient provider error both surface in the run summary."""
+    _store_member_answers(config, "Mixed reconciliation outcomes")
+    router.generation_status["gen-fixture-test/beta:free"] = 500
+
+    status, payload = _post_reconcile(web_url)
+
+    assert status == 200
+    assert payload["updated"] == 0
+    assert payload["unavailable"] == 1
+    assert payload["failed"] == 1
+    assert len({item["run_id"] for item in payload["items"]}) == 1
+    outcomes = {item["outcome"] for item in payload["items"]}
+    assert outcomes == {"unavailable", "failed"}
+    assert all(item["detail"] for item in payload["items"])
+    assert "will be retried on the next run" in payload["summary"]
+
+
+def test_web_reconcile_endpoint_validates_limit(web_url):
+    """The History panel may choose a batch size, but only within the supported range."""
+    for bad_limit in (0, -1, True, "10", 10_000):
+        status, payload = _post_reconcile(web_url, {"limit": bad_limit})
+        assert status == 400, bad_limit
+        assert "Reconcile limit" in payload["error"], bad_limit
+
+
 def test_web_query_streams_member_answers_then_synthesis(router, web_url):
     """POST /api/query streams discovered, member_answer, synthesizing, and synthesis."""
     req = Request(
@@ -186,6 +281,8 @@ def test_web_config_reports_search_web_default(web_url):
     with urlopen(f"{web_url}/api/config", timeout=5) as cfg_resp:
         cfg = json.loads(cfg_resp.read().decode("utf-8"))
     assert cfg["search_web"] is False
+    # The panel labels its batch cap from the server so both stay in step.
+    assert cfg["reconcile_limit"] == WEB_RECONCILE_LIMIT
 
 
 def test_web_query_search_web_adds_server_tools_to_every_call(router, web_url):
