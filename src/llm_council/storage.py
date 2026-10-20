@@ -6,6 +6,8 @@ import json
 import logging
 import re
 import shutil
+from collections.abc import Sequence
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -15,7 +17,13 @@ import duckdb
 
 from .config import SaveMode, Settings
 from .errors import StorageError
-from .models import ModelAnswer
+from .models import (
+    GENERATION_ID_USAGE_KEY,
+    GENERATION_RECONCILED_AT_KEY,
+    GENERATION_UNAVAILABLE_KEY,
+    GENERATION_USAGE_KEY,
+    ModelAnswer,
+)
 from .report import build_report_html
 
 logger = logging.getLogger("llm_council")
@@ -29,6 +37,13 @@ ARTIFACT_STAMP_FORMAT = "%Y%m%dT%H%M"
 EXPORT_RUN_LIMIT = 5000
 
 HTML_REPORT_SUFFIX = ".html"
+
+# Usage keys that mark a stored response as already reconciled with /generation.
+_RECONCILED_USAGE_KEYS = (
+    GENERATION_USAGE_KEY,
+    GENERATION_RECONCILED_AT_KEY,
+    GENERATION_UNAVAILABLE_KEY,
+)
 
 _PROMPT_STOP_WORDS = {
     "a",
@@ -523,6 +538,107 @@ def export_html(
     return tuple(exported)
 
 
+def _parse_usage(raw_usage: Any) -> dict[str, Any]:
+    """Decode a stored `responses.usage` JSON value into a plain mapping."""
+    if isinstance(raw_usage, dict):
+        return dict(raw_usage)
+    if isinstance(raw_usage, str) and raw_usage:
+        try:
+            loaded = json.loads(raw_usage)
+        except json.JSONDecodeError:
+            logger.warning("Ignoring unreadable stored usage JSON: %r", raw_usage[:200])
+            return {}
+        if isinstance(loaded, dict):
+            return loaded
+    return {}
+
+
+@dataclass(frozen=True)
+class GenerationCandidates:
+    """Stored responses that still need `GET /generation` reconciliation."""
+
+    pending: tuple[dict[str, Any], ...] = ()
+    # Responses with no generation ID: Gemini answers and runs recorded before
+    # inline metadata capture. They cannot be reconciled after the fact.
+    without_generation_id: int = 0
+
+
+def _open_storage(settings: Settings, *, read_only: bool) -> Any:
+    """Connect to the configured DuckDB file after confirming it exists."""
+    if not settings.duckdb_path.is_file():
+        raise StorageError(f"DuckDB file {settings.duckdb_path} does not exist.")
+    return duckdb.connect(str(settings.duckdb_path), read_only=read_only)
+
+
+def load_generation_candidates(
+    settings: Settings, *, limit: int | None = None
+) -> GenerationCandidates:
+    """Return stored responses whose generation accounting has not been fetched.
+
+    Newest responses come first so a bounded run reconciles recent work. Column
+    names mirror `responses`, and no prompt text is read: reconciliation only
+    needs identity, model, and the stored `usage` JSON.
+    """
+    try:
+        with _open_storage(settings, read_only=True) as connection:
+            tables = {row[0] for row in connection.execute("SHOW TABLES").fetchall()}
+            if not {"responses", "questions"}.issubset(tables):
+                return GenerationCandidates()
+            rows = connection.execute(
+                """
+                SELECT id, question_id, stage, requested_model, model, usage
+                FROM responses
+                ORDER BY created_at DESC
+                """
+            ).fetchall()
+    except (duckdb.Error, OSError) as exc:
+        raise StorageError(f"Cannot read stored responses for reconciliation: {exc}") from exc
+    pending: list[dict[str, Any]] = []
+    without_generation_id = 0
+    for response_id, question_id, stage, requested_model, model_id, raw_usage in rows:
+        usage = _parse_usage(raw_usage)
+        generation_id = usage.get(GENERATION_ID_USAGE_KEY)
+        if not isinstance(generation_id, str) or not generation_id.strip():
+            without_generation_id += 1
+            continue
+        if any(key in usage for key in _RECONCILED_USAGE_KEYS):
+            continue
+        if limit is not None and len(pending) >= limit:
+            continue
+        pending.append(
+            {
+                "response_id": str(response_id),
+                "question_id": str(question_id),
+                "stage": stage,
+                "requested_model": requested_model,
+                "model": model_id,
+                "generation_id": generation_id.strip(),
+                "usage": usage,
+            }
+        )
+    return GenerationCandidates(pending=tuple(pending), without_generation_id=without_generation_id)
+
+
+def save_generation_reconciliation(
+    settings: Settings, updates: Sequence[tuple[str, dict[str, Any]]]
+) -> int:
+    """Write merged `usage` JSON for reconciled responses and return the row count."""
+    if not updates:
+        return 0
+    try:
+        with _open_storage(settings, read_only=False) as connection:
+            connection.executemany(
+                "UPDATE responses SET usage = ? WHERE id = ?",
+                [
+                    (json.dumps(usage, ensure_ascii=False), response_id)
+                    for response_id, usage in updates
+                ],
+            )
+    except (duckdb.Error, OSError) as exc:
+        raise StorageError(f"Cannot store reconciled generation usage: {exc}") from exc
+    return len(updates)
+
+
 def load_history(
     *,
     env_file: str | Path | None = None,
@@ -568,16 +684,7 @@ def load_history(
                         [question_id],
                     ).fetchall()
                     for stage, req_model, model_id, content, error, raw_usage in response_rows:
-                        parsed_usage: dict[str, Any] = {}
-                        if isinstance(raw_usage, str) and raw_usage:
-                            try:
-                                loaded = json.loads(raw_usage)
-                                if isinstance(loaded, dict):
-                                    parsed_usage = loaded
-                            except json.JSONDecodeError:
-                                parsed_usage = {}
-                        elif isinstance(raw_usage, dict):
-                            parsed_usage = raw_usage
+                        parsed_usage = _parse_usage(raw_usage)
                         if stage == "initial":
                             answers.append(
                                 {

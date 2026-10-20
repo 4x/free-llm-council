@@ -90,6 +90,7 @@ uv run llm-council -q "What shipped in the latest Rust release?" --search-web
 uv run llm-council --followup "provide more details about that last security caveat" --copy
 uv run llm-council --export-markdown
 uv run llm-council --export-html
+uv run llm-council --reconcile-generations
 uv run llm-council --web --open-browser --port 8765
 uv run llm-council -q "Explain entropy" --judge auto --judge-scope all
 python -m llm_council --help
@@ -174,6 +175,30 @@ always be checked against what was saved. Two consequences are worth knowing:
 ```text
 html-output/<first-six-prompt-words>-report-<YYYYMMDDThhmm>.html
 ```
+
+### Exact accounting reconciliation (`--reconcile-generations`)
+
+Inline metadata reports the router's own accounting. Only the upstream provider knows exact
+native tokenizer counts, BYOK cost, and the cache discount actually applied, so
+`--reconcile-generations` (or `llm_council.reconcile_generations()`) fetches
+`GET /generation?id=<gen_id>` for stored answers and merges the payload into
+`usage["generation"]` in DuckDB. No other column, prompt text, or answer content is touched,
+and no schema migration is needed.
+
+This is the one command that makes API calls without running a council. It is opt-in,
+idempotent, and safe to re-run:
+
+- Only responses that already store a `generation_id` qualify. Gemini answers and runs
+  recorded before metadata capture are counted and skipped, never guessed at.
+- `generation_reconciled_at` marks finished rows; a second pass fetches nothing.
+- A generation OpenRouter has pruned (HTTP 404) is recorded once as `generation_unavailable`
+  and never retried; transient failures (network, 429, 5xx) leave the row queued and make the
+  command exit with status 1 so the partial failure is visible.
+- `--reconcile-limit N` bounds a pass to the newest `N` answers.
+
+Once written, the Web UI and HTML reports show the reconciled values in place: native prompt
+and completion counts appear in the token pill tooltip, and a nonzero upstream cost adds an
+`upstream $...` pill alongside the router cost.
 
 ## Configuration
 
@@ -377,7 +402,7 @@ any model that already errored). This avoids repeating a known-failing endpoint.
   overrides.
   Non-text models and configured routers are not council members. No `:free` suffix is fabricated.
 - Server-side web search is opt-in with `--search-web` / `SEARCH_WEB=1` (Python `search_web=True`). OpenRouter receives `tools: [{"type": "openrouter:web_search", "parameters": {"max_uses": 3}}]`; the model decides whether to search, so a request may run 0–3 searches, and `usage.server_tool_use.web_search_requests` records how many ran (logged at `DEBUG`). This is the current server-tool form: the older `plugins: [{id: "web"}]` and `:online` suffix are deprecated. **Search charges are billed on top of token costs and are not covered by the free-model price cap (`provider.max_price`), so a free model is not a free search.** Cap: 3 searches per member/judge request (`WEB_SEARCH_MAX_USES`).
-- Every OpenRouter chat completion request sends `X-OpenRouter-Metadata: enabled` and enriches `ModelAnswer.usage` (persisted in DuckDB's `responses.usage` JSON column without schema changes) with `generation_id` (from `payload.id` or `X-Generation-Id`), `elapsed_ms`, `finish_reason`, `native_finish_reason`, `service_tier`, normalized provider routing (`provider`, `strategy`, `region`, `attempt`, `generation_time`, `ttft`, `tps`, and raw `openrouter_metadata`), token/reasoning/cache breakdowns, cost/web-search cost, and deduplicated web `citations` (from OpenRouter `message.annotations` or Gemini `grounding_metadata`). Both the Web UI and self-contained HTML reports render these metadata pills and collapsible citation strips on council member and synthesis cards.
+- Every OpenRouter chat completion request sends `X-OpenRouter-Metadata: enabled` and enriches `ModelAnswer.usage` (persisted in DuckDB's `responses.usage` JSON column without schema changes) with `generation_id` (from `payload.id` or `X-Generation-Id`), `elapsed_ms`, `finish_reason`, `native_finish_reason`, `service_tier`, normalized provider routing (`provider`, `strategy`, `region`, `attempt`, `generation_time`, `ttft`, `tps`, and raw `openrouter_metadata`), token/reasoning/cache breakdowns, cost/web-search cost, and deduplicated web `citations` (from OpenRouter `message.annotations` or Gemini `grounding_metadata`). Both the Web UI and self-contained HTML reports render these metadata pills and collapsible citation strips on council member and synthesis cards. `--reconcile-generations` later adds native tokenizer counts and upstream BYOK cost from `GET /generation` into the same JSON, which the token tooltip and an `upstream $...` pill expose.
 - Search cost is per search request, not per token: none of the live free models has native search, so `engine: "auto"` runs Exa `auto` at **$0.007 per search** (up to 10 results included; our default `max_results` of 5 never triggers the $0.001 per-extra-result fee). At the 3-search cap that is **$0.021 per request worst case**, and a model that decides not to search costs nothing extra. The [capability reference](docs/reference/openrouter-api-capabilities.md#9-server-tools-web-search-adopted-the-rest-unused) lists every engine's rate.
 - Discovery for search picks council members that advertise tool calling (`supported_parameters` contains `tools`), because the server tool is invoked through the `tools` array; it does **not** require provider-native search, since `engine: "auto"` falls back to Exa. Native search is exposed per endpoint as `native_tools["openrouter:web_search"]` and only affects which engine runs. In the live free catalog 15 of 16 text models support tools (only `nvidia/nemotron-3.5-content-safety:free` does not); the rest are skipped when `SEARCH_WEB` is on.
 - The judge is included: automatic strategies (`random`, `round-robin`, `most-intelligent`, `largest-context`) only consider tool-capable models when `SEARCH_WEB` is on, an explicit judge that cannot call tools is rejected before any member request, and configured router judges (`free-router`, `auto`) are left to OpenRouter's routing. `GEMINI_MODELS` are searched through the Gemini API's Google Search grounding tool (`types.Tool(google_search=...)`) instead of OpenRouter; `--improve` never searches.

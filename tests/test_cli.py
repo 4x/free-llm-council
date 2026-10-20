@@ -696,3 +696,76 @@ def test_cli_gemini_models_flag_is_forwarded(monkeypatch):
     )
     assert code == 0
     assert captured["gemini_models"] == "gemini-3.6-flash,gemini-3.7-flash,gemini-3.8-flash"
+
+
+def _store_run_with_generations(router, cli_env, tmp_path):
+    """Run one council and register upstream accounting for both member generations."""
+    first = run_cli(
+        ["-q", "Accounting question", "--save-initial-answers", "duckdb"], tmp_path, cli_env
+    )
+    assert first.returncode == 0, first.stderr
+    for model_id in ("test/alpha:free", "test/beta:free"):
+        generation_id = f"gen-fixture-{model_id}"
+        router.generations[generation_id] = {
+            "id": generation_id,
+            "native_tokens_prompt": 40,
+            "native_tokens_completion": 160,
+            "upstream_inference_cost": 0.0012,
+            "cache_discount": 0.0001,
+        }
+
+
+def test_cli_reconcile_generations_fills_upstream_accounting(cli_env, router, tmp_path):
+    _store_run_with_generations(router, cli_env, tmp_path)
+
+    result = run_cli(["--reconcile-generations"], tmp_path, cli_env)
+
+    assert result.returncode == 0, result.stderr
+    assert "Reconciled 2 of 2 stored answer(s)." in result.stdout
+    with duckdb.connect(str(tmp_path / "council.duckdb")) as db:
+        rows = db.execute("SELECT usage FROM responses WHERE stage = 'initial'").fetchall()
+    usages = [json.loads(row[0]) for row in rows]
+    assert len(usages) == 2
+    assert all(usage["generation"]["upstream_inference_cost"] == 0.0012 for usage in usages)
+    assert all(usage["generation"]["native_tokens_prompt"] == 40 for usage in usages)
+
+    # A second pass has nothing left to fetch and says so.
+    again = run_cli(["--reconcile-generations"], tmp_path, cli_env)
+    assert again.returncode == 0, again.stderr
+    assert "No stored answers are awaiting reconciliation." in again.stdout
+
+
+def test_cli_reconcile_limit_bounds_the_batch(cli_env, router, tmp_path):
+    _store_run_with_generations(router, cli_env, tmp_path)
+
+    result = run_cli(["--reconcile-generations", "--reconcile-limit", "1"], tmp_path, cli_env)
+
+    assert result.returncode == 0, result.stderr
+    assert "Reconciled 1 of 1 stored answer(s)." in result.stdout
+    with duckdb.connect(str(tmp_path / "council.duckdb")) as db:
+        usages = [
+            json.loads(row[0])
+            for row in db.execute("SELECT usage FROM responses WHERE stage = 'initial'").fetchall()
+        ]
+    assert sum("generation" in usage for usage in usages) == 1
+
+
+def test_cli_reconcile_reports_transient_failures_with_exit_code_one(cli_env, router, tmp_path):
+    _store_run_with_generations(router, cli_env, tmp_path)
+    router.generation_status["gen-fixture-test/alpha:free"] = 500
+
+    result = run_cli(["--reconcile-generations"], tmp_path, cli_env)
+
+    assert result.returncode == 1
+    assert "1 failed and will be retried on the next run." in result.stdout
+    assert "fixture generation failure" in result.stderr
+
+
+def test_cli_reconcile_rejects_incompatible_flags(cli_env, tmp_path):
+    combined = run_cli(["--reconcile-generations", "-q", "Question"], tmp_path, cli_env)
+    assert combined.returncode == 2
+    assert "cannot be combined" in combined.stderr
+
+    orphan_limit = run_cli(["--reconcile-limit", "2"], tmp_path, cli_env)
+    assert orphan_limit.returncode == 2
+    assert "requires --reconcile-generations" in orphan_limit.stderr

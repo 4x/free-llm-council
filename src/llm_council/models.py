@@ -19,6 +19,12 @@ TEXT_CHARGES = (
     "input_cache_write",
 )
 
+# Usage keys owned by post-run reconciliation against `GET /generation?id=`.
+GENERATION_ID_USAGE_KEY = "generation_id"
+GENERATION_USAGE_KEY = "generation"
+GENERATION_RECONCILED_AT_KEY = "generation_reconciled_at"
+GENERATION_UNAVAILABLE_KEY = "generation_unavailable"
+
 
 def is_text_model(model: dict[str, Any]) -> bool:
     architecture = model.get("architecture")

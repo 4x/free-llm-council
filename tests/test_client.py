@@ -777,3 +777,57 @@ def test_gemini_api_error_retries_429_and_redacts_key(monkeypatch):
     assert "gem-secret-key" not in str(caught.value)
     assert "[redacted]" in str(caught.value)
     assert caught.value.status_code == 403
+
+
+def test_get_generation_fetches_upstream_accounting(client):
+    """GET /generation returns native tokenizer counts and BYOK upstream cost."""
+    seen = {}
+
+    def handler(request):
+        seen["method"] = request.method
+        seen["path"] = request.url.path
+        seen["id"] = request.url.params.get("id")
+        return httpx.Response(
+            200,
+            json={
+                "data": {
+                    "id": "gen-accounting",
+                    "native_tokens_prompt": 39,
+                    "native_tokens_completion": 158,
+                    "upstream_inference_cost": 0.0021,
+                    "cache_discount": 0.0004,
+                }
+            },
+        )
+
+    transport(client, handler)
+    data = client.get_generation(" gen-accounting ")
+    assert seen == {"method": "GET", "path": "/api/v1/generation", "id": "gen-accounting"}
+    assert data["native_tokens_prompt"] == 39
+    assert data["native_tokens_completion"] == 158
+    assert data["upstream_inference_cost"] == 0.0021
+
+
+def test_get_generation_rejects_a_payload_without_data(client):
+    transport(client, lambda _: httpx.Response(200, json={"data": None}))
+    with pytest.raises(OpenRouterError, match="no generation metadata"):
+        client.get_generation("gen-missing")
+
+
+def test_get_generation_surfaces_the_http_status(client):
+    """Callers distinguish a pruned generation (404) from a transient failure."""
+    transport(
+        client,
+        lambda _: httpx.Response(
+            404, json={"error": {"code": 404, "message": "Generation not found"}}
+        ),
+    )
+    with pytest.raises(OpenRouterError) as caught:
+        client.get_generation("gen-gone")
+    assert caught.value.status_code == 404
+    assert "Generation not found" in str(caught.value)
+
+
+def test_get_generation_requires_an_id(client):
+    with pytest.raises(OpenRouterError, match="generation ID is required"):
+        client.get_generation("   ")

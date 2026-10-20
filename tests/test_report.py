@@ -234,6 +234,13 @@ def _persist_run(settings, question_id: str, prompt: str, synthesis: str) -> Non
                     "content": "Conjugate prior details",
                 }
             ],
+            "generation": {
+                "native_tokens_prompt": 38,
+                "native_tokens_completion": 155,
+                "upstream_inference_cost": 0.0021,
+                "cache_discount": 0.0004,
+            },
+            "generation_reconciled_at": 1790000000,
         },
     )
     synth_answer = ModelAnswer(
@@ -272,6 +279,11 @@ def test_export_html_writes_one_self_contained_report_per_stored_run(tmp_path):
     assert "gen-synth-002" in content
     assert "Fireworks" in content
     assert "https://example.com/beta-dist" in content
+    # Reconciled GET /generation accounting is embedded and rendered offline.
+    assert '"upstream_inference_cost": 0.0021' in content
+    assert '"native_tokens_prompt": 38' in content
+    assert "Native prompt: " in content
+    assert "upstream provider cost" in content.lower()
     assert "buildUsageElement" in content
     assert "buildCitationsElement" in content
     assert _markup_only(content).count("url(data:font/woff2;base64,") == 20

@@ -11,7 +11,13 @@ from urllib.request import Request, urlopen
 
 import pytest
 
-from llm_council import CouncilError, create_web_server, load_history, query_result
+from llm_council import (
+    CouncilError,
+    create_web_server,
+    load_history,
+    query_result,
+    reconcile_generations,
+)
 
 
 @pytest.fixture()
@@ -70,6 +76,10 @@ def test_web_index_serves_required_ui_elements(web_url):
     assert 'id="db-history-list"' in html
     assert "function renderUsagePillsHtml(usage)" in html
     assert "function renderCitationsHtml(usage)" in html
+    # Reconciled GET /generation fields render as pills and tooltip detail.
+    assert "Native prompt: " in html
+    assert "upstream_inference_cost" in html
+    assert "cache discount" in html
     assert "citations-strip" in html
     assert "meta-pill" in html
 
@@ -101,6 +111,36 @@ def test_web_config_and_history_endpoints(config, router, web_url):
     assert len(entry["answers"]) == 2
     assert entry["answers"][0]["usage"]["provider"] == "FixtureProvider"
     assert entry["source"] == "db"
+
+
+def test_web_history_exposes_reconciled_generation_accounting(config, router, web_url):
+    """Native token counts and BYOK cost written by reconciliation reach the browser."""
+    query_result(
+        "Reconciled DB question",
+        settings=config,
+        save_prompt="none",
+        save_initial_answers="duckdb",
+        save_synthesis="none",
+    )
+    for model_id in ("test/alpha:free", "test/beta:free"):
+        generation_id = f"gen-fixture-{model_id}"
+        router.generations[generation_id] = {
+            "id": generation_id,
+            "native_tokens_prompt": 39,
+            "native_tokens_completion": 158,
+            "upstream_inference_cost": 0.0021,
+            "cache_discount": 0.0004,
+        }
+    report = reconcile_generations(settings=config)
+    assert report.updated_count == 2
+
+    with urlopen(f"{web_url}/api/history", timeout=5) as hist_resp:
+        entry = json.loads(hist_resp.read().decode("utf-8"))["history"][0]
+
+    usages = [answer["usage"] for answer in entry["answers"]]
+    assert len(usages) == 2
+    assert all(usage["generation"]["native_tokens_prompt"] == 39 for usage in usages)
+    assert all(usage["generation"]["upstream_inference_cost"] == 0.0021 for usage in usages)
 
 
 def test_web_query_streams_member_answers_then_synthesis(router, web_url):

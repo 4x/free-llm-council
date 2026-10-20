@@ -1496,6 +1496,11 @@ _UI_HTML = r"""<!doctype html>
     const orMeta = usage.openrouter_metadata && typeof usage.openrouter_metadata === "object"
       ? usage.openrouter_metadata
       : {};
+    // Post-run reconciliation (GET /generation) adds native tokenizer counts and
+    // upstream BYOK cost that inline metadata cannot report.
+    const recon = usage.generation && typeof usage.generation === "object"
+      ? usage.generation
+      : {};
 
     let provider = typeof usage.provider === "string" ? usage.provider : "";
     if (!provider && Array.isArray(orMeta.endpoints)) {
@@ -1568,6 +1573,12 @@ _UI_HTML = r"""<!doctype html>
       if (compTok !== null) tokTooltip.push(`Completion: ${compTok}`);
       if (reasoningTok > 0) tokTooltip.push(`Reasoning: ${reasoningTok}`);
       if (cachedTok > 0) tokTooltip.push(`Cached read: ${cachedTok}`);
+      if (typeof recon.native_tokens_prompt === "number") {
+        tokTooltip.push(`Native prompt: ${recon.native_tokens_prompt}`);
+      }
+      if (typeof recon.native_tokens_completion === "number") {
+        tokTooltip.push(`Native completion: ${recon.native_tokens_completion}`);
+      }
       pills.push(
         `<span class="meta-pill" title="${escapeHtml(tokTooltip.join(" · ") || label)}">${escapeHtml(label)}</span>`
       );
@@ -1591,11 +1602,24 @@ _UI_HTML = r"""<!doctype html>
       const searchLabel = `${searchReqs} search${searchReqs === 1 ? "" : "es"}` + (toolCost > 0 ? ` (${formatUsd(toolCost)})` : "");
       pills.push(`<span class="meta-pill search" title="OpenRouter server-side web search">🌐 ${escapeHtml(searchLabel)}</span>`);
     }
+    const cacheDiscount = typeof recon.cache_discount === "number" && recon.cache_discount > 0
+      ? recon.cache_discount
+      : 0;
     if (totalCost > 0) {
-      const costTitle = toolCost > 0 ? `Total cost: ${formatUsd(totalCost)} (includes ${formatUsd(toolCost)} web search)` : `Cost: ${formatUsd(totalCost)}`;
+      const costSuffix = toolCost > 0 ? ` (includes ${formatUsd(toolCost)} web search)` : "";
+      const cacheSuffix = cacheDiscount > 0 ? ` · cache discount ${formatUsd(cacheDiscount)}` : "";
+      const costTitle = `Total cost: ${formatUsd(totalCost)}${costSuffix}${cacheSuffix}`;
       pills.push(`<span class="meta-pill cost" title="${escapeHtml(costTitle)}">${escapeHtml(formatUsd(totalCost))}</span>`);
     } else if (toolCost > 0 && searchReqs === 0) {
       pills.push(`<span class="meta-pill cost" title="Web search cost">${escapeHtml(formatUsd(toolCost))}</span>`);
+    }
+
+    const upstreamCost = typeof recon.upstream_inference_cost === "number" && recon.upstream_inference_cost > 0
+      ? recon.upstream_inference_cost
+      : 0;
+    if (upstreamCost > 0) {
+      const upstreamTitle = `Upstream provider cost (BYOK): ${formatUsd(upstreamCost)} · reconciled from GET /generation`;
+      pills.push(`<span class="meta-pill cost" title="${escapeHtml(upstreamTitle)}">upstream ${escapeHtml(formatUsd(upstreamCost))}</span>`);
     }
 
     const genId = typeof usage.generation_id === "string" && usage.generation_id ? usage.generation_id : "";

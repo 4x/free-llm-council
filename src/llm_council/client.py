@@ -34,6 +34,8 @@ WEB_SEARCH_MAX_USES = 3
 OPENROUTER_METADATA_HEADER = "X-OpenRouter-Metadata"
 OPENROUTER_METADATA_ENABLED = "enabled"
 GENERATION_ID_HEADER = "X-Generation-Id"
+# Post-hoc accounting for one generation: native tokenizer counts and upstream cost.
+GENERATION_PATH = "generation"
 MS_PER_SECOND = 1000
 
 
@@ -422,6 +424,27 @@ class OpenRouterClient:
                     continue
             raise OpenRouterError(f"OpenRouter error {status}: {message}", status)
         raise AssertionError("Retry loop must return or raise")
+
+    def get_generation(self, generation_id: str) -> dict[str, Any]:
+        """Fetch post-run accounting for one generation from `GET /generation`.
+
+        Inline metadata already reports the router's own token counts and cost. This
+        endpoint adds what only the upstream provider knows: native tokenizer counts,
+        `upstream_inference_cost` for BYOK keys, and the applied `cache_discount`.
+        """
+        clean_id = generation_id.strip()
+        if not clean_id:
+            raise OpenRouterError("A generation ID is required to fetch generation metadata.")
+        payload = self._request("GET", GENERATION_PATH, params={"id": clean_id})
+        data = payload.get("data")
+        if not isinstance(data, dict):
+            raise OpenRouterError(
+                self._redact(
+                    f"OpenRouter returned no generation metadata for {clean_id}: "
+                    f"{json.dumps(payload, ensure_ascii=False)}"
+                )
+            )
+        return data
 
     def _fetch_openrouter_models(
         self, *, free_only: bool = True, **filters: str | int

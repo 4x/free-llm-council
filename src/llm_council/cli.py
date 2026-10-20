@@ -18,6 +18,7 @@ from .config import LOG_LEVELS
 from .council import _read_prompt, improve_prompt, query
 from .errors import ConfigurationError, CouncilError
 from .judges import STRATEGIES
+from .reconcile import reconcile_generations
 from .storage import export_html, export_markdown
 from .web import DEFAULT_WEB_HOST, DEFAULT_WEB_PORT, serve_web
 
@@ -60,6 +61,20 @@ def parser() -> argparse.ArgumentParser:
         "--export-html",
         action="store_true",
         help=("Export stored DuckDB runs with syntheses as self-contained HTML reports and exit"),
+    )
+    result.add_argument(
+        "--reconcile-generations",
+        action="store_true",
+        help=(
+            "Fetch exact native token counts and upstream BYOK cost for stored answers "
+            "from GET /generation, update DuckDB, and exit"
+        ),
+    )
+    result.add_argument(
+        "--reconcile-limit",
+        type=int,
+        metavar="N",
+        help="Reconcile at most N stored answers, newest first (default: all)",
     )
     result.add_argument(
         "--web",
@@ -287,8 +302,29 @@ def main(argv: Sequence[str] | None = None) -> int:
     should_export = args.export_markdown
     should_export_html = args.export_html
     should_serve_web = args.web
+    should_reconcile = args.reconcile_generations
     improve_arg = args.improve_prompt
     prompt_index = args.prompt_index
+    if should_reconcile and (
+        should_serve_web
+        or should_export
+        or should_export_html
+        or followup_prompt is not None
+        or args.file is not None
+        or args.prompt is not None
+        or improve_arg is not None
+        or prompt_index is not None
+        or args.no_save
+    ):
+        arg_parser.error(
+            "--reconcile-generations cannot be combined with --question, --file, "
+            "--followup, --improve, --prompt, --web, --export-markdown, "
+            "--export-html, or --no-save"
+        )
+    if args.reconcile_limit is not None and not should_reconcile:
+        arg_parser.error("--reconcile-limit requires --reconcile-generations")
+    if args.reconcile_limit is not None and args.reconcile_limit < 1:
+        arg_parser.error("--reconcile-limit must be at least 1")
     if should_serve_web and (
         should_export
         or should_export_html
@@ -340,6 +376,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         not should_serve_web
         and not should_export
         and not should_export_html
+        and not should_reconcile
         and followup_prompt is None
         and improve_arg is None
         and prompt_index is None
@@ -352,6 +389,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         options.pop("followup_prompt")
         options.pop("export_markdown")
         options.pop("export_html")
+        options.pop("reconcile_generations")
+        reconcile_limit = options.pop("reconcile_limit", None)
         options.pop("web")
         web_host = options.pop("host")
         web_port = options.pop("port")
@@ -381,6 +420,15 @@ def main(argv: Sequence[str] | None = None) -> int:
             for path in written:
                 print(path)
             return 0
+        if should_reconcile:
+            options.pop("prompt")
+            options.pop("file")
+            options.pop("no_save", None)
+            report = reconcile_generations(limit=reconcile_limit, **options)
+            print(report.summary())
+            for failure in report.failures:
+                print(f"  {failure.model}: {failure.detail}", file=sys.stderr)
+            return 1 if report.failures else 0
         if improve_arg is not None:
             no_save = bool(options.pop("no_save", False))
             for unused in (

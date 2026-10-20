@@ -35,6 +35,10 @@ class MockRouter:
         self.page_size = 1000
         self.reply: dict[str, Any] | None = None
         self.model_replies: dict[str, dict[str, Any]] = {}
+        # GET /generation fixtures: known IDs return `data`, unknown IDs 404, and
+        # `generation_status` forces a transient failure for one ID.
+        self.generations: dict[str, dict[str, Any]] = {}
+        self.generation_status: dict[str, int] = {}
         state = self
 
         class Handler(BaseHTTPRequestHandler):
@@ -49,9 +53,27 @@ class MockRouter:
                 self.end_headers()
                 self.wfile.write(data)
 
+            def send_generation(self, params: dict[str, list[str]]) -> None:
+                generation_id = params.get("id", [""])[0]
+                status = state.generation_status.get(generation_id, 200)
+                if status != 200:
+                    self.send(
+                        {"error": {"code": status, "message": "fixture generation failure"}},
+                        status,
+                    )
+                    return
+                data = state.generations.get(generation_id)
+                if data is None:
+                    self.send({"error": {"code": 404, "message": "Generation not found"}}, 404)
+                    return
+                self.send({"data": data})
+
             def do_GET(self) -> None:
                 params = parse_qs(urlsplit(self.path).query)
                 state.gets.append(params)
+                if urlsplit(self.path).path.rstrip("/").endswith("/generation"):
+                    self.send_generation(params)
+                    return
                 catalog = state.ranked if "sort" in params else state.catalog
                 # Honor the catalog price caps so free-only queries really hide paid models.
                 if "max_price" in params:

@@ -424,6 +424,11 @@ _BOOT_SCRIPT = """
     var orMeta = usage.openrouter_metadata && typeof usage.openrouter_metadata === "object"
       ? usage.openrouter_metadata
       : {};
+    // Post-run reconciliation (GET /generation) adds native tokenizer counts and
+    // upstream BYOK cost that inline metadata cannot report.
+    var recon = usage.generation && typeof usage.generation === "object"
+      ? usage.generation
+      : {};
     var pills = [];
     function addPill(text, cls, title) {
       var span = document.createElement("span");
@@ -504,6 +509,12 @@ _BOOT_SCRIPT = """
       if (compTok !== null) tokTitle.push("Completion: " + compTok);
       if (reasoningTok > 0) tokTitle.push("Reasoning: " + reasoningTok);
       if (cachedTok > 0) tokTitle.push("Cached read: " + cachedTok);
+      if (typeof recon.native_tokens_prompt === "number") {
+        tokTitle.push("Native prompt: " + recon.native_tokens_prompt);
+      }
+      if (typeof recon.native_tokens_completion === "number") {
+        tokTitle.push("Native completion: " + recon.native_tokens_completion);
+      }
       addPill(label, "", tokTitle.join(" · "));
     }
 
@@ -524,14 +535,32 @@ _BOOT_SCRIPT = """
         + (toolCost > 0 ? " (" + formatUsd(toolCost) + ")" : "");
       addPill("🌐 " + searchLabel, "search", "OpenRouter server-side web search");
     }
+    var rawDiscount = recon.cache_discount;
+    var cacheDiscount = typeof rawDiscount === "number" && rawDiscount > 0 ? rawDiscount : 0;
     if (totalCost > 0) {
-      var costSuffix = " (includes " + formatUsd(toolCost) + " web search)";
+      var costSuffix = toolCost > 0
+        ? " (includes " + formatUsd(toolCost) + " web search)"
+        : "";
+      if (cacheDiscount > 0) {
+        costSuffix += " · cache discount " + formatUsd(cacheDiscount);
+      }
       var costTitle = toolCost > 0
         ? "Total cost: " + formatUsd(totalCost) + costSuffix
-        : "Cost: " + formatUsd(totalCost);
+        : "Cost: " + formatUsd(totalCost) + costSuffix;
       addPill(formatUsd(totalCost), "cost", costTitle);
     } else if (toolCost > 0 && searchReqs === 0) {
       addPill(formatUsd(toolCost), "cost", "Web search cost");
+    }
+
+    var rawUpstream = recon.upstream_inference_cost;
+    var upstreamCost = typeof rawUpstream === "number" && rawUpstream > 0 ? rawUpstream : 0;
+    if (upstreamCost > 0) {
+      addPill(
+        "upstream " + formatUsd(upstreamCost),
+        "cost",
+        "Upstream provider cost (BYOK): " + formatUsd(upstreamCost)
+          + " · reconciled from GET /generation"
+      );
     }
 
     var rawGenId = usage.generation_id;

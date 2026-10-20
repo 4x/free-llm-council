@@ -9,15 +9,18 @@ Audit of what `llm-council` uses from the OpenRouter API versus what the platfor
 | `POST /chat/completions` | [client.py](../../src/llm_council/client.py) `complete()` | `model`, `messages`, `stream: false`, optional `max_tokens`, `provider.max_price` for free-only enforcement, `X-OpenRouter-Metadata: enabled` request header, and optional `tools: [{"type": "openrouter:web_search", "parameters": {"max_uses": 3}}]` for server-side web search |
 | `GET /models` | [client.py](../../src/llm_council/client.py) `list_models()` | Filters: `input_modalities=text`, `output_modalities=text`, `max_price=0`, `max_output_price=0`, `limit`, `offset`; plus `sort=intelligence-high-to-low` and `min_intelligence_index=0` for the `most-intelligent` judge |
 | Response `usage` + inline metadata | `complete()` → `ModelAnswer.usage` | Persisted to DuckDB (`responses.usage`); includes `generation_id` (`id` / `X-Generation-Id`), `elapsed_ms`, `finish_reason`, `native_finish_reason`, `service_tier`, `provider`, `strategy`, `region`, `attempt`, `generation_time`, `ttft`, `tps`, `openrouter_metadata`, `completion_tokens_details.reasoning_tokens`, `prompt_tokens_details.cached_tokens`, `cost`, `cost_details.server_tool_cost`, `server_tool_use.web_search_requests`, and deduplicated web `citations` (`message.annotations` / Gemini `grounding_metadata`). Rendered as pills and citation strips in the Web UI and HTML reports |
+| `GET /generation?id=` | [client.py](../../src/llm_council/client.py) `get_generation()` via [reconcile.py](../../src/llm_council/reconcile.py) | On demand (`--reconcile-generations`), backfills `native_tokens_prompt`, `native_tokens_completion`, `upstream_inference_cost`, `cache_discount`, and the full payload into `usage["generation"]` for stored answers |
 | Error metadata | `_request()` | Special-cases 402 `openrouter_in_flight_budget` vs. other 402; honors `Retry-After` |
 
-We do not yet send attribution headers, poll `GET /generation?id=`, ask for structured output (`response_format`), stream (`stream: true`), or inspect `/endpoints`.
+We do not yet send attribution headers, ask for structured output (`response_format`), stream (`stream: true`), or inspect `/endpoints`.
 
 ## Gaps worth closing
 
-### 1. Async generation accounting: `GET /generation?id=`
+### 1. Async generation accounting: `GET /generation?id=` (adopted)
 
-Inline router metadata (`X-OpenRouter-Metadata: enabled`), `generation_id`, `provider`, `generation_time`, `elapsed_ms`, token splits, search costs, and citations are now captured directly from `POST /chat/completions` into `ModelAnswer.usage`. `GET /generation?id=<id>` remains useful only if we need asynchronous post-run reconciliation of exact native tokenizer counts (`native_tokens_*`), upstream BYOK cost (`upstream_inference_cost`), or `cache_discount`.
+Inline router metadata (`X-OpenRouter-Metadata: enabled`), `generation_id`, `provider`, `generation_time`, `elapsed_ms`, token splits, search costs, and citations are captured directly from `POST /chat/completions` into `ModelAnswer.usage`. Only the upstream provider knows exact native tokenizer counts (`native_tokens_*`), BYOK cost (`upstream_inference_cost`), and the `cache_discount` actually applied, so `--reconcile-generations` fetches `GET /generation?id=<id>` for stored answers and merges the payload into `usage["generation"]`.
+
+The pass is opt-in and idempotent: rows are selected by the `generation_id` already stored, `generation_reconciled_at` marks finished ones, a pruned generation (404) is recorded once as `generation_unavailable` instead of being retried forever, and transient failures leave the row queued. Gemini answers and runs recorded before metadata capture have no generation ID and are counted but skipped. GET requests are not paced like chat completions; a 429 still sleeps for `Retry-After` through the normal retry path.
 
 Reference: [generation metadata](https://openrouter.ai/docs/api/api-reference/generations/get-request-&-usage-metadata-for-a-generation), [router metadata](https://openrouter.ai/docs/guides/features/router-metadata)
 
@@ -153,8 +156,7 @@ Our retry logic distinguishes only 402 in-flight budget from other 402s. OpenRou
 ## Suggested priority
 
 1. Attribution headers — trivial, immediate.
-2. `GET /generation` — unlocks cost/latency/provider reporting we already persist `usage` for.
-3. `response_format` json_schema — deletes the fragile `_parse_improved_prompts` heuristics.
-4. `reasoning` budget controls (`effort` / `max_tokens` / `enabled: false`) — the actual fix for reasoning consuming `MAX_TOKENS`; the truncation message now reports the reasoning/visible token split, so a reasoning-starved run is identified without extra instrumentation. Do **not** reach for `exclude`.
-5. `GET /key` — concrete 402 diagnosis and free-tier visibility.
-6. `models` fallback array + provider preferences — simplifies the judge loop.
+2. `response_format` json_schema — deletes the fragile `_parse_improved_prompts` heuristics.
+3. `reasoning` budget controls (`effort` / `max_tokens` / `enabled: false`) — the actual fix for reasoning consuming `MAX_TOKENS`; the truncation message now reports the reasoning/visible token split, so a reasoning-starved run is identified without extra instrumentation. Do **not** reach for `exclude`.
+4. `GET /key` — concrete 402 diagnosis and free-tier visibility.
+5. `models` fallback array + provider preferences — simplifies the judge loop.

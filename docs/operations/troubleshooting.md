@@ -101,6 +101,15 @@ Stored prompts are often pasted LaTeX documents; [docs/architecture/latex-docume
 - **Stray `$`, `<`, or `<y<1$` in the text.** The stored text itself has damaged `$` delimiters — common in material copied out of a PDF, where parts of formulas were lost before the prompt was ever saved. Delimiters that are not paired are left as literal text; they are not repaired, because deciding whether a lone `$` is math or currency is not reliably decidable.
 - **`eqnarray` still renders.** It is mapped onto KaTeX's `aligned`, so a document written with the older name typesets; its `&=&` bodies are retried as `aligned` when the original environment rejects them.
 
+## Reconciliation failures (`--reconcile-generations`)
+
+Symptom: the pass prints rows under the summary and exits with status 1.
+
+- `OpenRouter error 404: ...` is handled, not a failure: the generation was pruned, so the row is tagged `generation_unavailable` and never fetched again. Nothing else to do.
+- Any other error (401/403, 429, 5xx, transport) leaves the row queued and is retried on the next run. Fix the cause — usually `OPENROUTER_API_KEY` or a temporary outage — then re-run; the summary's failure lines name the model and the full provider message.
+- `No stored answers are awaiting reconciliation; N have no generation ID` means the stored rows predate metadata capture or came from Gemini. There is nothing to fetch; native counts for those runs cannot be recovered.
+- `DuckDB file ... does not exist` means the run history lives elsewhere; point `--duckdb-path`/`DUCKDB_PATH` at the right file.
+
 ## DuckDB locked / missing tables
 
 - Do not run concurrent writer processes against the same DuckDB file; use separate files or serialize runs.
