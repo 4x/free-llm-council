@@ -6,22 +6,20 @@ Audit of what `llm-council` uses from the OpenRouter API versus what the platfor
 
 | Surface | Where | Notes |
 | --- | --- | --- |
-| `POST /chat/completions` | [client.py](../../src/llm_council/client.py) `complete()` | `model`, `messages`, `stream: false`, optional `max_tokens`, `provider.max_price` for free-only enforcement, and optional `tools: [{"type": "openrouter:web_search", "parameters": {"max_uses": 3}}]` for server-side web search |
+| `POST /chat/completions` | [client.py](../../src/llm_council/client.py) `complete()` | `model`, `messages`, `stream: false`, optional `max_tokens`, `provider.max_price` for free-only enforcement, `X-OpenRouter-Metadata: enabled` request header, and optional `tools: [{"type": "openrouter:web_search", "parameters": {"max_uses": 3}}]` for server-side web search |
 | `GET /models` | [client.py](../../src/llm_council/client.py) `list_models()` | Filters: `input_modalities=text`, `output_modalities=text`, `max_price=0`, `max_output_price=0`, `limit`, `offset`; plus `sort=intelligence-high-to-low` and `min_intelligence_index=0` for the `most-intelligent` judge |
-| Response `usage` | `complete()` → `ModelAnswer.usage` | Persisted to DuckDB; web UI shows `total_tokens` only |
+| Response `usage` + inline metadata | `complete()` → `ModelAnswer.usage` | Persisted to DuckDB (`responses.usage`); includes `generation_id` (`id` / `X-Generation-Id`), `elapsed_ms`, `finish_reason`, `native_finish_reason`, `service_tier`, `provider`, `strategy`, `region`, `attempt`, `generation_time`, `ttft`, `tps`, `openrouter_metadata`, `completion_tokens_details.reasoning_tokens`, `prompt_tokens_details.cached_tokens`, `cost`, `cost_details.server_tool_cost`, `server_tool_use.web_search_requests`, and deduplicated web `citations` (`message.annotations` / Gemini `grounding_metadata`). Rendered as pills and citation strips in the Web UI and HTML reports |
 | Error metadata | `_request()` | Special-cases 402 `openrouter_in_flight_budget` vs. other 402; honors `Retry-After` |
 
-Nothing else. We never send attribution headers, never read per-generation metadata, never ask for structured output, never stream, and never inspect provider endpoints.
+We do not yet send attribution headers, poll `GET /generation?id=`, ask for structured output (`response_format`), stream (`stream: true`), or inspect `/endpoints`.
 
 ## Gaps worth closing
 
-### 1. Per-generation metadata: `GET /generation?id=`
+### 1. Async generation accounting: `GET /generation?id=`
 
-Every chat response includes an `id` (`gen-...`) which we currently discard. `GET /generation?id=<id>` returns cost, latency, generation time, finish reason, and the `provider_name` that actually served the request, plus prompt/completion/reasoning/cached token counts.
+Inline router metadata (`X-OpenRouter-Metadata: enabled`), `generation_id`, `provider`, `generation_time`, `elapsed_ms`, token splits, search costs, and citations are now captured directly from `POST /chat/completions` into `ModelAnswer.usage`. `GET /generation?id=<id>` remains useful only if we need asynchronous post-run reconciliation of exact native tokenizer counts (`native_tokens_*`), upstream BYOK cost (`upstream_inference_cost`), or `cache_discount`.
 
-We store `model` but not `provider_name`, so the `Nvidia` 400 in [to-do.txt](../../to-do.txt) is only discoverable by reading the raw error. Fetching generation metadata would let us report per-member cost, latency, and provider, and would drive a "which free model is fastest / most reliable" leaderboard from our own runs.
-
-Reference: [generation metadata](https://openrouter.ai/docs/api/api-reference/generations/get-request-&-usage-metadata-for-a-generation)
+Reference: [generation metadata](https://openrouter.ai/docs/api/api-reference/generations/get-request-&-usage-metadata-for-a-generation), [router metadata](https://openrouter.ai/docs/guides/features/router-metadata)
 
 ### 2. Account and key state: `GET /key`
 

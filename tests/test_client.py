@@ -522,12 +522,11 @@ def test_gemini_complete_converts_messages_and_usage(monkeypatch):
     assert answer.requested_model == "gemini-3.6-flash"
     assert answer.model == "gemini-3.6-flash-001"
     assert answer.content == "Gemini answer text"
-    assert answer.usage == {
-        "prompt_tokens": 12,
-        "completion_tokens": 38,
-        "completion_tokens_details": {"reasoning_tokens": 8},
-        "total_tokens": 50,
-    }
+    assert answer.usage["prompt_tokens"] == 12
+    assert answer.usage["completion_tokens"] == 38
+    assert answer.usage["completion_tokens_details"] == {"reasoning_tokens": 8}
+    assert answer.usage["total_tokens"] == 50
+    assert isinstance(answer.usage.get("elapsed_ms"), int)
     assert len(captured_calls) == 1
     call = captured_calls[0]
     assert call["model"] == "gemini-3.6-flash"
@@ -538,6 +537,132 @@ def test_gemini_complete_converts_messages_and_usage(monkeypatch):
         ("model", "First model reply"),
         ("user", "Followup question"),
     ]
+
+
+def test_openrouter_complete_captures_router_metadata_timing_and_citations(client):
+    seen_headers: list[dict[str, str]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen_headers.append(dict(request.headers))
+        return httpx.Response(
+            200,
+            headers={"X-Generation-Id": "gen-header-fallback"},
+            json={
+                "id": "gen-abc123xyz",
+                "model": "qwen/qwen3-coder:free",
+                "service_tier": "auto",
+                "choices": [
+                    {
+                        "message": {
+                            "content": "Synthesized answer with web citations.",
+                            "annotations": [
+                                {
+                                    "type": "url_citation",
+                                    "url_citation": {
+                                        "url": "https://openrouter.ai/docs/guides/features/router-metadata",
+                                        "title": "OpenRouter Router Metadata",
+                                        "content": "Documentation on X-OpenRouter-Metadata header",
+                                        "start_index": 0,
+                                        "end_index": 42,
+                                    },
+                                },
+                                {
+                                    "type": "url_citation",
+                                    "url_citation": {
+                                        "url": "https://openrouter.ai/docs/guides/features/router-metadata",
+                                        "title": "Duplicate URL is deduplicated",
+                                    },
+                                },
+                            ],
+                        },
+                        "finish_reason": "stop",
+                        "native_finish_reason": "STOP",
+                    }
+                ],
+                "usage": {
+                    "prompt_tokens": 120,
+                    "completion_tokens": 300,
+                    "total_tokens": 420,
+                    "cost": 0.004,
+                    "prompt_tokens_details": {"cached_tokens": 40},
+                    "completion_tokens_details": {"reasoning_tokens": 180},
+                    "cost_details": {"server_tool_cost": 0.004},
+                    "server_tool_use": {"web_search_requests": 1},
+                },
+                "openrouter_metadata": {
+                    "strategy": "fallback",
+                    "region": "us-east",
+                    "attempt": 2,
+                    "generation_time": 1420,
+                    "summary": "Selected Fireworks after 1 retry",
+                    "endpoints": [
+                        {"provider": "Together", "selected": False, "attempt": 1, "status": 429},
+                        {
+                            "provider": "Fireworks",
+                            "selected": True,
+                            "attempt": 2,
+                            "status": 200,
+                            "ttft": 210,
+                            "tps": 85.4,
+                        },
+                    ],
+                },
+            },
+        )
+
+    transport(client, handler)
+    answer = client.complete(
+        "openrouter/free",
+        [{"role": "user", "content": "Explain OpenRouter metadata"}],
+        free_only=True,
+        search_web=True,
+    )
+
+    assert seen_headers[0].get("x-openrouter-metadata") == "enabled"
+    assert answer.requested_model == "openrouter/free"
+    assert answer.model == "qwen/qwen3-coder:free"
+    assert answer.usage["generation_id"] == "gen-abc123xyz"
+    assert answer.usage["finish_reason"] == "stop"
+    assert answer.usage["native_finish_reason"] == "STOP"
+    assert answer.usage["service_tier"] == "auto"
+    assert answer.usage["provider"] == "Fireworks"
+    assert answer.usage["strategy"] == "fallback"
+    assert answer.usage["region"] == "us-east"
+    assert answer.usage["attempt"] == 2
+    assert answer.usage["generation_time"] == 1420
+    assert answer.usage["ttft"] == 210
+    assert answer.usage["tps"] == 85.4
+    assert isinstance(answer.usage["elapsed_ms"], int)
+    assert answer.usage["completion_tokens_details"] == {"reasoning_tokens": 180}
+    assert answer.usage["prompt_tokens_details"] == {"cached_tokens": 40}
+    assert answer.usage["cost_details"] == {"server_tool_cost": 0.004}
+    assert answer.usage["citations"] == [
+        {
+            "url": "https://openrouter.ai/docs/guides/features/router-metadata",
+            "title": "OpenRouter Router Metadata",
+            "content": "Documentation on X-OpenRouter-Metadata header",
+            "start_index": 0,
+            "end_index": 42,
+        }
+    ]
+
+
+def test_openrouter_complete_falls_back_to_x_generation_id_header(client):
+    def handler(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            headers={"X-Generation-Id": "gen-from-header-999"},
+            json={
+                "model": "test/alpha:free",
+                "choices": [{"message": {"content": "Hello"}, "finish_reason": "stop"}],
+                "usage": {"total_tokens": 10},
+            },
+        )
+
+    transport(client, handler)
+    answer = client.complete("test/alpha:free", [{"role": "user", "content": "Hi"}])
+
+    assert answer.usage["generation_id"] == "gen-from-header-999"
 
 
 def test_gemini_max_tokens_truncation_raises_actionable_error(monkeypatch):

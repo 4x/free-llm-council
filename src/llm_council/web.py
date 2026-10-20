@@ -826,10 +826,83 @@ _UI_HTML = r"""<!doctype html>
   .answer-meta {
     display: flex;
     align-items: center;
-    gap: 8px;
+    gap: 6px;
+    flex-wrap: wrap;
     font-family: var(--mono);
     font-size: 11px;
     color: var(--text-muted);
+  }
+
+  .meta-pill {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    padding: 2px 7px;
+    border-radius: 6px;
+    background: var(--bg-panel);
+    border: 1px solid var(--border);
+    color: var(--text-muted);
+    font-family: var(--mono);
+    font-size: 10.5px;
+    white-space: nowrap;
+  }
+
+  .meta-pill.provider {
+    color: var(--accent);
+    border-color: rgba(88, 166, 255, 0.35);
+    background: var(--accent-soft);
+  }
+
+  .meta-pill.cost {
+    color: var(--amber);
+    border-color: rgba(210, 153, 34, 0.35);
+    background: var(--amber-soft);
+  }
+
+  .meta-pill.search {
+    color: var(--purple);
+    border-color: rgba(188, 140, 255, 0.35);
+    background: var(--purple-soft);
+  }
+
+  .citations-strip {
+    margin: 0 20px 14px;
+    padding: 8px 12px;
+    border-radius: 8px;
+    background: rgba(88, 166, 255, 0.06);
+    border: 1px solid rgba(88, 166, 255, 0.25);
+    font-size: 12px;
+  }
+
+  .citations-strip summary {
+    cursor: pointer;
+    font-family: var(--mono);
+    font-size: 11px;
+    color: var(--accent);
+    user-select: none;
+  }
+
+  .citations-list {
+    margin: 8px 0 0;
+    padding-left: 18px;
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+  }
+
+  .citations-list li {
+    color: var(--text-muted);
+    line-height: 1.4;
+  }
+
+  .citations-list a {
+    color: var(--accent);
+    text-decoration: none;
+    word-break: break-all;
+  }
+
+  .citations-list a:hover {
+    text-decoration: underline;
   }
 
   .copy-btn {
@@ -1389,10 +1462,178 @@ _UI_HTML = r"""<!doctype html>
     renderWorkspace();
   }
 
+  function extractUsageCitations(usage) {
+    if (!usage || typeof usage !== "object") return [];
+    const raw = Array.isArray(usage.citations)
+      ? usage.citations
+      : (Array.isArray(usage.annotations) ? usage.annotations : []);
+    const seen = new Set();
+    const out = [];
+    for (const item of raw) {
+      if (!item || typeof item !== "object") continue;
+      const src = item.url_citation && typeof item.url_citation === "object" ? item.url_citation : item;
+      const url = typeof src.url === "string" ? src.url.trim() : "";
+      if (!url || (!url.startsWith("http://") && !url.startsWith("https://")) || seen.has(url)) continue;
+      seen.add(url);
+      out.push({
+        url,
+        title: typeof src.title === "string" && src.title.trim() ? src.title.trim() : url,
+        content: typeof src.content === "string" && src.content.trim() ? src.content.trim() : "",
+      });
+    }
+    return out;
+  }
+
+  function formatUsd(val) {
+    if (typeof val !== "number" || !Number.isFinite(val) || val <= 0) return "";
+    if (val >= 0.01) return "$" + val.toFixed(3).replace(/0+$/, "").replace(/\.$/, "");
+    return "$" + val.toFixed(4).replace(/0+$/, "").replace(/\.$/, "");
+  }
+
+  function renderUsagePillsHtml(usage) {
+    if (!usage || typeof usage !== "object") return "";
+    const pills = [];
+    const orMeta = usage.openrouter_metadata && typeof usage.openrouter_metadata === "object"
+      ? usage.openrouter_metadata
+      : {};
+
+    let provider = typeof usage.provider === "string" ? usage.provider : "";
+    if (!provider && Array.isArray(orMeta.endpoints)) {
+      const sel = orMeta.endpoints.find(ep => ep && ep.selected && (ep.provider || ep.provider_name));
+      if (sel) provider = String(sel.provider || sel.provider_name);
+    }
+    const attempt = typeof usage.attempt === "number" ? usage.attempt
+      : (typeof orMeta.attempt === "number" ? orMeta.attempt : 1);
+    const strategy = typeof usage.strategy === "string" ? usage.strategy
+      : (typeof orMeta.strategy === "string" ? orMeta.strategy : "");
+    const region = typeof usage.region === "string" ? usage.region
+      : (typeof orMeta.region === "string" ? orMeta.region : "");
+    if (provider) {
+      const attemptSuffix = attempt > 1 ? ` · attempt ${attempt}` : "";
+      const tooltipParts = [`Provider: ${provider}`];
+      if (strategy) tooltipParts.push(`strategy: ${strategy}`);
+      if (region) tooltipParts.push(`region: ${region}`);
+      if (attempt > 1) tooltipParts.push(`attempt: ${attempt}`);
+      pills.push(
+        `<span class="meta-pill provider" title="${escapeHtml(tooltipParts.join(" · "))}">via ${escapeHtml(provider + attemptSuffix)}</span>`
+      );
+    } else if (attempt > 1) {
+      pills.push(`<span class="meta-pill provider">attempt ${attempt}</span>`);
+    }
+
+    const genMs = typeof usage.generation_time === "number" ? usage.generation_time
+      : (typeof orMeta.generation_time === "number" ? orMeta.generation_time : null);
+    const elapsedMs = typeof usage.elapsed_ms === "number" ? usage.elapsed_ms : null;
+    const displayMs = genMs !== null && genMs > 0 ? genMs : elapsedMs;
+    if (typeof displayMs === "number" && displayMs >= 0) {
+      const secText = displayMs >= 1000 ? (displayMs / 1000).toFixed(1) + "s" : Math.round(displayMs) + "ms";
+      const timingTitle = genMs !== null && elapsedMs !== null
+        ? `Generation: ${Math.round(genMs)}ms · Wall-clock: ${Math.round(elapsedMs)}ms`
+        : (genMs !== null ? `Generation: ${Math.round(genMs)}ms` : `Latency: ${Math.round(displayMs)}ms`);
+      pills.push(`<span class="meta-pill" title="${escapeHtml(timingTitle)}">⏱ ${escapeHtml(secText)}</span>`);
+    }
+
+    const totalTok = typeof usage.total_tokens === "number" ? usage.total_tokens : null;
+    const promptTok = typeof usage.prompt_tokens === "number" ? usage.prompt_tokens : null;
+    const compTok = typeof usage.completion_tokens === "number" ? usage.completion_tokens : null;
+    const compDetails = usage.completion_tokens_details && typeof usage.completion_tokens_details === "object"
+      ? usage.completion_tokens_details
+      : {};
+    const promptDetails = usage.prompt_tokens_details && typeof usage.prompt_tokens_details === "object"
+      ? usage.prompt_tokens_details
+      : {};
+    const reasoningTok = typeof compDetails.reasoning_tokens === "number" && compDetails.reasoning_tokens > 0
+      ? compDetails.reasoning_tokens
+      : 0;
+    const cachedTok = typeof promptDetails.cached_tokens === "number" && promptDetails.cached_tokens > 0
+      ? promptDetails.cached_tokens
+      : 0;
+
+    if (totalTok !== null && totalTok > 0) {
+      const details = [];
+      if (reasoningTok > 0 && compTok !== null) {
+        const visibleTok = Math.max(compTok - reasoningTok, 0);
+        details.push(`${visibleTok} ans + ${reasoningTok} reasoning`);
+      } else if (reasoningTok > 0) {
+        details.push(`${reasoningTok} reasoning`);
+      }
+      if (cachedTok > 0) {
+        details.push(`${cachedTok} cached`);
+      }
+      const label = details.length > 0
+        ? `${totalTok} tok (${details.join(" · ")})`
+        : `${totalTok} tok`;
+      const tokTooltip = [];
+      if (promptTok !== null) tokTooltip.push(`Prompt: ${promptTok}`);
+      if (compTok !== null) tokTooltip.push(`Completion: ${compTok}`);
+      if (reasoningTok > 0) tokTooltip.push(`Reasoning: ${reasoningTok}`);
+      if (cachedTok > 0) tokTooltip.push(`Cached read: ${cachedTok}`);
+      pills.push(
+        `<span class="meta-pill" title="${escapeHtml(tokTooltip.join(" · ") || label)}">${escapeHtml(label)}</span>`
+      );
+    }
+
+    const toolUse = usage.server_tool_use && typeof usage.server_tool_use === "object"
+      ? usage.server_tool_use
+      : {};
+    const searchReqs = typeof toolUse.web_search_requests === "number" && toolUse.web_search_requests > 0
+      ? toolUse.web_search_requests
+      : 0;
+    const costDetails = usage.cost_details && typeof usage.cost_details === "object"
+      ? usage.cost_details
+      : {};
+    const toolCost = typeof costDetails.server_tool_cost === "number" && costDetails.server_tool_cost > 0
+      ? costDetails.server_tool_cost
+      : 0;
+    const totalCost = typeof usage.cost === "number" && usage.cost > 0 ? usage.cost : 0;
+
+    if (searchReqs > 0) {
+      const searchLabel = `${searchReqs} search${searchReqs === 1 ? "" : "es"}` + (toolCost > 0 ? ` (${formatUsd(toolCost)})` : "");
+      pills.push(`<span class="meta-pill search" title="OpenRouter server-side web search">🌐 ${escapeHtml(searchLabel)}</span>`);
+    }
+    if (totalCost > 0) {
+      const costTitle = toolCost > 0 ? `Total cost: ${formatUsd(totalCost)} (includes ${formatUsd(toolCost)} web search)` : `Cost: ${formatUsd(totalCost)}`;
+      pills.push(`<span class="meta-pill cost" title="${escapeHtml(costTitle)}">${escapeHtml(formatUsd(totalCost))}</span>`);
+    } else if (toolCost > 0 && searchReqs === 0) {
+      pills.push(`<span class="meta-pill cost" title="Web search cost">${escapeHtml(formatUsd(toolCost))}</span>`);
+    }
+
+    const genId = typeof usage.generation_id === "string" && usage.generation_id ? usage.generation_id : "";
+    const nativeStop = typeof usage.native_finish_reason === "string" && usage.native_finish_reason
+      ? usage.native_finish_reason
+      : "";
+    if (genId) {
+      const shortGen = genId.length > 16 ? genId.slice(0, 14) + "…" : genId;
+      const genTitle = nativeStop ? `Generation ID: ${genId} · stop: ${nativeStop}` : `Generation ID: ${genId}`;
+      pills.push(`<span class="meta-pill" title="${escapeHtml(genTitle)}">${escapeHtml(shortGen)}</span>`);
+    }
+
+    return pills.join("");
+  }
+
+  function renderCitationsHtml(usage) {
+    const citations = extractUsageCitations(usage);
+    if (citations.length === 0) return "";
+    const items = citations.map(c => {
+      const snippet = c.content ? ` — <span>${escapeHtml(c.content.slice(0, 140))}${c.content.length > 140 ? "…" : ""}</span>` : "";
+      return `<li><a href="${escapeHtml(c.url)}" target="_blank" rel="noopener noreferrer">${escapeHtml(c.title)}</a>${snippet}</li>`;
+    }).join("");
+    return `
+      <details class="citations-strip">
+        <summary>🔗 ${citations.length} web citation${citations.length === 1 ? "" : "s"}</summary>
+        <ol class="citations-list">${items}</ol>
+      </details>
+    `;
+  }
+
   function renderAnswerCard(ans, index, total) {
     const isError = Boolean(ans.error);
     const modelName = ans.model || ans.requested_model || "unknown-model";
-    const tokens = ans.usage && ans.usage.total_tokens ? `${ans.usage.total_tokens} tok` : "";
+    const routedNote = ans.requested_model && ans.model && ans.requested_model !== ans.model
+      ? ` (via ${ans.requested_model})`
+      : "";
+    const pillsHtml = renderUsagePillsHtml(ans.usage);
+    const citationsHtml = !isError ? renderCitationsHtml(ans.usage) : "";
     const cardClass = isError ? "answer-card error-card" : "answer-card";
     const statusBadge = isError
       ? '<span class="badge" style="color:var(--red);border-color:rgba(248,81,73,0.4);">failed</span>'
@@ -1405,15 +1646,16 @@ _UI_HTML = r"""<!doctype html>
       <article class="${cardClass}" data-answer-index="${index}">
         <header class="answer-header">
           <div class="answer-model">
-            <span>🤖 ${escapeHtml(modelName)}</span>
+            <span>🤖 ${escapeHtml(modelName + routedNote)}</span>
             ${statusBadge}
           </div>
           <div class="answer-meta">
-            ${tokens ? `<span>${escapeHtml(tokens)}</span>` : ""}
+            ${pillsHtml}
             ${!isError && ans.content ? `<button type="button" class="copy-btn" data-copy-text="${escapeHtml(ans.content)}">Copy</button>` : ""}
           </div>
         </header>
         <div class="markdown-body">${bodyHtml}</div>
+        ${citationsHtml}
       </article>
     `;
   }
@@ -1446,6 +1688,9 @@ _UI_HTML = r"""<!doctype html>
       ? ` (fallback from ${run.judge_requested})`
       : "";
     const elapsed = run.elapsed ? ` · ${run.elapsed}` : "";
+    const synthUsage = run.synthesis_usage || {};
+    const pillsHtml = renderUsagePillsHtml(synthUsage);
+    const citationsHtml = renderCitationsHtml(synthUsage);
     return `
       <article class="answer-card synthesis-card" id="synthesis-card">
         <header class="answer-header">
@@ -1455,10 +1700,12 @@ _UI_HTML = r"""<!doctype html>
           </div>
           <div class="answer-meta">
             <span>${(run.answers || []).filter(a => a.content).length} valid answers${escapeHtml(elapsed)}</span>
+            ${pillsHtml}
             <button type="button" class="copy-btn" data-copy-text="${escapeHtml(run.synthesis || "")}">Copy</button>
           </div>
         </header>
         <div class="markdown-body">${renderLatexDocument(run.synthesis || "")}</div>
+        ${citationsHtml}
       </article>
     `;
   }
@@ -1682,6 +1929,7 @@ _UI_HTML = r"""<!doctype html>
       prompt: displayPrompt,
       answers: [],
       synthesis: null,
+      synthesis_usage: {},
       judge: null,
       judge_requested: judgeValue,
       running: true,
@@ -1812,6 +2060,7 @@ _UI_HTML = r"""<!doctype html>
       run.stageText = `Synthesizing ${evt.valid_count} valid answers with judge ${evt.judge}…`;
     } else if (evt.type === "synthesis") {
       run.synthesis = evt.synthesis;
+      run.synthesis_usage = evt.usage || {};
       run.judge = evt.judge;
       run.judge_requested = evt.judge_requested || run.judge_requested;
       run.elapsed = evt.elapsed;

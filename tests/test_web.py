@@ -68,6 +68,10 @@ def test_web_index_serves_required_ui_elements(web_url):
     assert 'id="pagination-bar"' in html
     assert 'id="session-history-list"' in html
     assert 'id="db-history-list"' in html
+    assert "function renderUsagePillsHtml(usage)" in html
+    assert "function renderCitationsHtml(usage)" in html
+    assert "citations-strip" in html
+    assert "meta-pill" in html
 
 
 def test_web_config_and_history_endpoints(config, router, web_url):
@@ -92,7 +96,10 @@ def test_web_config_and_history_endpoints(config, router, web_url):
     entry = hist["history"][0]
     assert entry["prompt"] == "Persisted DB question"
     assert entry["synthesis"] == "Synthesized fixture answer"
+    assert entry["synthesis_usage"]["generation_id"] == "gen-fixture-synth"
+    assert entry["synthesis_usage"]["provider"] == "FixtureProvider"
     assert len(entry["answers"]) == 2
+    assert entry["answers"][0]["usage"]["provider"] == "FixtureProvider"
     assert entry["source"] == "db"
 
 
@@ -125,6 +132,9 @@ def test_web_query_streams_member_answers_then_synthesis(router, web_url):
     synth_evt = events[-1]
     assert synth_evt["synthesis"] == "Synthesized fixture answer"
     assert synth_evt["judge"] == "test/beta:free"
+    assert synth_evt["usage"]["generation_id"] == "gen-fixture-synth"
+    assert synth_evt["usage"]["provider"] == "FixtureProvider"
+    assert all(call["openrouter_metadata_header"] == "enabled" for call in router.calls)
     assert (
         router.calls[0]["messages"][0]["content"]
         == "Explain quantum tunneling\n\nInclude WKB approximation"

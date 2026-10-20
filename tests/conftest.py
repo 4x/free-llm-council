@@ -82,6 +82,7 @@ class MockRouter:
             def do_POST(self) -> None:
                 body = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
                 body["authorization"] = self.headers.get("Authorization")
+                body["openrouter_metadata_header"] = self.headers.get("X-OpenRouter-Metadata")
                 state.calls.append(body)
                 is_judge = body["messages"][0]["role"] == "system"
                 if body["model"] in state.fail_models or (is_judge and state.judge_failure):
@@ -99,9 +100,23 @@ class MockRouter:
                 )
                 self.send(
                     {
+                        "id": "gen-fixture-synth" if is_judge else f"gen-fixture-{body['model']}",
                         "model": actual,
-                        "choices": [{"message": {"content": text}, "finish_reason": "stop"}],
+                        "choices": [
+                            {
+                                "message": {"content": text},
+                                "finish_reason": "stop",
+                                "native_finish_reason": "STOP",
+                            }
+                        ],
                         "usage": {"total_tokens": 42},
+                        "openrouter_metadata": {
+                            "strategy": "direct",
+                            "region": "us-east",
+                            "attempt": 1,
+                            "generation_time": 120,
+                            "endpoints": [{"provider": "FixtureProvider", "selected": True}],
+                        },
                     }
                 )
 

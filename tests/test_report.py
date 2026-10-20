@@ -208,13 +208,49 @@ def _stored_settings(tmp_path):
 
 
 def _persist_run(settings, question_id: str, prompt: str, synthesis: str) -> None:
-    answer = ModelAnswer("test/alpha:free", "test/alpha:free", content="Member answer")
+    answer = ModelAnswer(
+        "openrouter/free",
+        "test/alpha:free",
+        content="Member answer",
+        usage={
+            "generation_id": "gen-member-001",
+            "provider": "Fireworks",
+            "strategy": "fallback",
+            "attempt": 2,
+            "generation_time": 1250,
+            "elapsed_ms": 1300,
+            "prompt_tokens": 40,
+            "completion_tokens": 160,
+            "total_tokens": 200,
+            "completion_tokens_details": {"reasoning_tokens": 60},
+            "prompt_tokens_details": {"cached_tokens": 20},
+            "cost": 0.004,
+            "cost_details": {"server_tool_cost": 0.004},
+            "server_tool_use": {"web_search_requests": 1},
+            "citations": [
+                {
+                    "url": "https://example.com/beta-dist",
+                    "title": "Beta Distribution Reference",
+                    "content": "Conjugate prior details",
+                }
+            ],
+        },
+    )
+    synth_answer = ModelAnswer(
+        "test/alpha:free",
+        "test/alpha:free",
+        content=synthesis,
+        usage={
+            "generation_id": "gen-synth-002",
+            "provider": "Chutes",
+            "elapsed_ms": 2100,
+            "total_tokens": 512,
+        },
+    )
     with RunStorage(settings, question_id, prompt) as storage:
         storage.save_question(prompt, None)
         storage.save_answer(answer, "initial", 1)
-        storage.save_answer(
-            ModelAnswer("test/alpha:free", "test/alpha:free", content=synthesis), "synthesis"
-        )
+        storage.save_answer(synth_answer, "synthesis")
 
 
 def test_export_html_writes_one_self_contained_report_per_stored_run(tmp_path):
@@ -232,6 +268,12 @@ def test_export_html_writes_one_self_contained_report_per_stored_run(tmp_path):
     content = report.read_text(encoding="utf-8")
     assert content.startswith("<!doctype html>")
     assert "propto (x-x_1)^{p-1}" in content
+    assert "gen-member-001" in content
+    assert "gen-synth-002" in content
+    assert "Fireworks" in content
+    assert "https://example.com/beta-dist" in content
+    assert "buildUsageElement" in content
+    assert "buildCitationsElement" in content
     assert _markup_only(content).count("url(data:font/woff2;base64,") == 20
 
 

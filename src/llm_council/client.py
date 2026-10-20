@@ -31,6 +31,10 @@ GEMINI_DEFAULT_CONTEXT_LENGTH = 1_048_576
 # every search is billed on top of token costs, including for free models.
 WEB_SEARCH_TOOL_TYPE = "openrouter:web_search"
 WEB_SEARCH_MAX_USES = 3
+OPENROUTER_METADATA_HEADER = "X-OpenRouter-Metadata"
+OPENROUTER_METADATA_ENABLED = "enabled"
+GENERATION_ID_HEADER = "X-Generation-Id"
+MS_PER_SECOND = 1000
 
 
 def _web_search_tool() -> dict[str, Any]:
@@ -46,6 +50,175 @@ def _token_count(value: Any) -> int | None:
     if not isinstance(value, int) or isinstance(value, bool) or value < 0:
         return None
     return int(value)
+
+
+def _extract_provider_routing(payload: dict[str, Any]) -> dict[str, Any]:
+    """Extract normalized provider routing fields from payload and openrouter_metadata."""
+    routing: dict[str, Any] = {}
+    top_provider = payload.get("provider")
+    if isinstance(top_provider, str) and top_provider.strip():
+        routing["provider"] = top_provider.strip()
+
+    meta = payload.get("openrouter_metadata")
+    if not isinstance(meta, dict):
+        return routing
+
+    routing["openrouter_metadata"] = meta
+
+    selected_provider: str | None = None
+    selected_endpoint: dict[str, Any] | None = None
+    endpoints = meta.get("endpoints")
+    if isinstance(endpoints, list):
+        for ep in endpoints:
+            if isinstance(ep, dict) and ep.get("selected") is True:
+                selected_endpoint = ep
+                prov = ep.get("provider") or ep.get("provider_name")
+                if isinstance(prov, str) and prov.strip():
+                    selected_provider = prov.strip()
+                    break
+        if selected_provider is None and len(endpoints) == 1 and isinstance(endpoints[0], dict):
+            selected_endpoint = endpoints[0]
+            prov = endpoints[0].get("provider") or endpoints[0].get("provider_name")
+            if isinstance(prov, str) and prov.strip():
+                selected_provider = prov.strip()
+
+    if selected_endpoint is not None:
+        ttft = selected_endpoint.get("ttft")
+        if (
+            isinstance(ttft, (int, float))
+            and not isinstance(ttft, bool)
+            and math.isfinite(ttft)
+            and ttft >= 0
+        ):
+            routing["ttft"] = int(round(ttft))
+        tps = selected_endpoint.get("tps")
+        if (
+            isinstance(tps, (int, float))
+            and not isinstance(tps, bool)
+            and math.isfinite(tps)
+            and tps >= 0
+        ):
+            routing["tps"] = float(tps)
+
+    attempts = meta.get("attempts")
+    if isinstance(attempts, list) and attempts:
+        routing["attempts"] = attempts
+        if selected_provider is None:
+            for att in reversed(attempts):
+                if isinstance(att, dict):
+                    status = att.get("status")
+                    if status is None or status == 200 or status == "success":
+                        prov = att.get("provider") or att.get("provider_name")
+                        if isinstance(prov, str) and prov.strip():
+                            selected_provider = prov.strip()
+                            break
+
+    if selected_provider is None:
+        raw_prov = meta.get("provider") or meta.get("provider_name")
+        if isinstance(raw_prov, str) and raw_prov.strip():
+            selected_provider = raw_prov.strip()
+
+    if selected_provider is not None:
+        routing["provider"] = selected_provider
+
+    attempt_num = _token_count(meta.get("attempt"))
+    if attempt_num is not None and attempt_num > 0:
+        routing["attempt"] = attempt_num
+    elif isinstance(attempts, list) and attempts:
+        routing["attempt"] = len(attempts)
+
+    for str_key in ("strategy", "region", "summary"):
+        val = meta.get(str_key)
+        if isinstance(val, str) and val.strip():
+            routing[str_key] = val.strip()
+
+    gen_time = meta.get("generation_time")
+    if (
+        isinstance(gen_time, (int, float))
+        and not isinstance(gen_time, bool)
+        and math.isfinite(gen_time)
+        and gen_time >= 0
+    ):
+        routing["generation_time"] = int(round(gen_time))
+
+    return routing
+
+
+def _extract_citations(annotations: Any) -> list[dict[str, Any]]:
+    """Extract normalized web search citations from message.annotations."""
+    if not isinstance(annotations, list):
+        return []
+    citations: list[dict[str, Any]] = []
+    seen_urls: set[str] = set()
+    for item in annotations:
+        if not isinstance(item, dict):
+            continue
+        nested = item.get("url_citation")
+        source = nested if isinstance(nested, dict) else item
+        url = source.get("url")
+        if not isinstance(url, str):
+            continue
+        clean_url = url.strip()
+        if not (clean_url.startswith("http://") or clean_url.startswith("https://")):
+            continue
+        if clean_url in seen_urls:
+            continue
+        seen_urls.add(clean_url)
+        entry: dict[str, Any] = {"url": clean_url}
+        title = source.get("title")
+        if isinstance(title, str) and title.strip():
+            entry["title"] = title.strip()
+        snippet = source.get("content")
+        if isinstance(snippet, str) and snippet.strip():
+            entry["content"] = snippet.strip()
+        start_idx = _token_count(source.get("start_index"))
+        end_idx = _token_count(source.get("end_index"))
+        if start_idx is not None:
+            entry["start_index"] = start_idx
+        if end_idx is not None:
+            entry["end_index"] = end_idx
+        citations.append(entry)
+    return citations
+
+
+def _extract_gemini_citations(candidate: Any) -> list[dict[str, Any]]:
+    """Extract web search citations from Gemini grounding_metadata if present."""
+    grounding = getattr(candidate, "grounding_metadata", None)
+    if grounding is None and isinstance(candidate, dict):
+        grounding = candidate.get("grounding_metadata")
+    if grounding is None:
+        return []
+    chunks = getattr(grounding, "grounding_chunks", None)
+    if chunks is None and isinstance(grounding, dict):
+        chunks = grounding.get("grounding_chunks")
+    if not isinstance(chunks, list):
+        return []
+    citations: list[dict[str, Any]] = []
+    seen_urls: set[str] = set()
+    for chunk in chunks:
+        web = getattr(chunk, "web", None)
+        if web is None and isinstance(chunk, dict):
+            web = chunk.get("web")
+        if web is None:
+            continue
+        uri = getattr(web, "uri", None)
+        title = getattr(web, "title", None)
+        if isinstance(web, dict):
+            uri = web.get("uri", uri)
+            title = web.get("title", title)
+        if not isinstance(uri, str):
+            continue
+        clean_url = uri.strip()
+        if not (clean_url.startswith("http://") or clean_url.startswith("https://")):
+            continue
+        if clean_url in seen_urls:
+            continue
+        seen_urls.add(clean_url)
+        entry: dict[str, Any] = {"url": clean_url}
+        if isinstance(title, str) and title.strip():
+            entry["title"] = title.strip()
+        citations.append(entry)
+    return citations
 
 
 def _describe_length_stop(usage: Any, partial: bool) -> str:
@@ -91,7 +264,10 @@ class OpenRouterClient:
         self.settings = settings
         self.http = httpx.Client(
             base_url=settings.base_url.rstrip("/") + "/",
-            headers={"Authorization": f"Bearer {settings.api_key}"},
+            headers={
+                "Authorization": f"Bearer {settings.api_key}",
+                OPENROUTER_METADATA_HEADER: OPENROUTER_METADATA_ENABLED,
+            },
             timeout=settings.timeout,
         )
         self.gemini: genai.Client | None = None
@@ -196,6 +372,13 @@ class OpenRouterClient:
                 )
             error = payload.get("error")
             if response.is_success and not error:
+                header_gen_id = response.headers.get(GENERATION_ID_HEADER)
+                if (
+                    isinstance(header_gen_id, str)
+                    and header_gen_id.strip()
+                    and not isinstance(payload.get("id"), str)
+                ):
+                    payload = {**payload, "id": header_gen_id.strip()}
                 return payload
             detail = error if isinstance(error, dict) else {}
             status = response.status_code
@@ -486,6 +669,7 @@ class OpenRouterClient:
         for attempt in range(self.settings.max_retries + 1):
             logger.debug("Gemini generate_content %s (attempt %d)", model, attempt + 1)
             self._pace()
+            call_started = time.perf_counter()
             try:
                 response = self.gemini.models.generate_content(
                     model=api_model_name,
@@ -547,6 +731,12 @@ class OpenRouterClient:
                 )
             if not isinstance(content, str) or not content.strip():
                 raise OpenRouterError(f"Model {model} returned no text answer.")
+            elapsed_ms = max(0, int(round((time.perf_counter() - call_started) * MS_PER_SECOND)))
+            if usage:
+                usage["elapsed_ms"] = elapsed_ms
+            citations = _extract_gemini_citations(candidate)
+            if citations:
+                usage["citations"] = citations
             actual_model = getattr(response, "model_version", None)
             return ModelAnswer(
                 requested_model=model,
@@ -580,7 +770,14 @@ class OpenRouterClient:
         if search_web:
             # Search charges are billed separately and are not capped by provider.max_price.
             body["tools"] = [_web_search_tool()]
-        payload = self._request("POST", "chat/completions", json=body)
+        call_started = time.perf_counter()
+        payload = self._request(
+            "POST",
+            "chat/completions",
+            json=body,
+            headers={OPENROUTER_METADATA_HEADER: OPENROUTER_METADATA_ENABLED},
+        )
+        elapsed_ms = max(0, int(round((time.perf_counter() - call_started) * MS_PER_SECOND)))
         choices = payload.get("choices")
         if not isinstance(choices, list) or not choices or not isinstance(choices[0], dict):
             raise OpenRouterError(f"Model {model} returned no answer choices.")
@@ -605,7 +802,27 @@ class OpenRouterClient:
         if not isinstance(content, str) or not content.strip():
             raise OpenRouterError(f"Model {model} returned no text answer.")
         actual_model = payload.get("model")
-        usage_dict = usage if isinstance(usage, dict) else {}
+        usage_dict: dict[str, Any] = dict(usage) if isinstance(usage, dict) else {}
+        usage_dict["elapsed_ms"] = elapsed_ms
+        gen_id = payload.get("id")
+        if isinstance(gen_id, str) and gen_id.strip():
+            usage_dict["generation_id"] = gen_id.strip()
+        for reason_key in ("finish_reason", "native_finish_reason"):
+            reason_val = choice.get(reason_key)
+            if isinstance(reason_val, str) and reason_val.strip():
+                usage_dict[reason_key] = reason_val.strip()
+        service_tier = payload.get("service_tier")
+        if isinstance(service_tier, str) and service_tier.strip():
+            usage_dict["service_tier"] = service_tier.strip()
+        routing = _extract_provider_routing(payload)
+        if routing:
+            usage_dict.update(routing)
+        if isinstance(message, dict):
+            annotations = message.get("annotations")
+            citations = _extract_citations(annotations)
+            if citations:
+                usage_dict["citations"] = citations
+                usage_dict["annotations"] = annotations
         server_tool_use = usage_dict.get("server_tool_use")
         if search_web and isinstance(server_tool_use, dict):
             logger.debug(

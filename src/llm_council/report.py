@@ -157,6 +157,81 @@ _REPORT_CSS = """
     font-size: 13px;
   }
 
+  .usage-pills {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+    margin: 4px 0 12px;
+  }
+
+  .usage-pill {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    padding: 2px 8px;
+    border-radius: 999px;
+    background: #f6f8fa;
+    border: 1px solid #d8dee4;
+    color: #59636e;
+    font-family: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
+    font-size: 11.5px;
+  }
+
+  .usage-pill.provider {
+    color: #0969da;
+    border-color: rgba(9, 105, 218, 0.3);
+    background: rgba(9, 105, 218, 0.06);
+  }
+
+  .usage-pill.cost {
+    color: #9a6700;
+    border-color: rgba(154, 103, 0, 0.35);
+    background: rgba(154, 103, 0, 0.06);
+  }
+
+  .usage-pill.search {
+    color: #8250df;
+    border-color: rgba(130, 80, 223, 0.3);
+    background: rgba(130, 80, 223, 0.06);
+  }
+
+  .citations-strip {
+    margin: 12px 0 4px;
+    padding: 8px 12px;
+    border: 1px solid #e4e8ed;
+    border-radius: 6px;
+    background: #f6f8fa;
+    font-size: 13px;
+  }
+
+  .citations-strip summary {
+    cursor: pointer;
+    color: #59636e;
+    font-family: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
+    font-size: 12px;
+    font-weight: 600;
+  }
+
+  .citations-list {
+    margin: 6px 0 0;
+    padding-left: 20px;
+  }
+
+  .citations-list li {
+    margin: 3px 0;
+    line-height: 1.45;
+  }
+
+  .citations-list a {
+    color: #0969da;
+    text-decoration: none;
+    word-break: break-all;
+  }
+
+  .citations-list a:hover {
+    text-decoration: underline;
+  }
+
   .markdown-body {
     overflow-wrap: break-word;
   }
@@ -313,6 +388,215 @@ _BOOT_SCRIPT = """
 
   renderInto(document.getElementById("report-synthesis"), data.synthesis);
 
+  function extractCitations(usage) {
+    if (!usage || typeof usage !== "object") return [];
+    var raw = Array.isArray(usage.citations)
+      ? usage.citations
+      : (Array.isArray(usage.annotations) ? usage.annotations : []);
+    var seen = {};
+    var out = [];
+    for (var i = 0; i < raw.length; i++) {
+      var item = raw[i];
+      if (!item || typeof item !== "object") continue;
+      var nested = item.url_citation && typeof item.url_citation === "object";
+      var src = nested ? item.url_citation : item;
+      var url = typeof src.url === "string" ? src.url.trim() : "";
+      var isHttp = url.indexOf("http://") === 0 || url.indexOf("https://") === 0;
+      if (!url || !isHttp || seen[url]) continue;
+      seen[url] = true;
+      out.push({
+        url: url,
+        title: typeof src.title === "string" && src.title.trim() ? src.title.trim() : url,
+        content: typeof src.content === "string" && src.content.trim() ? src.content.trim() : ""
+      });
+    }
+    return out;
+  }
+
+  function formatUsd(val) {
+    if (typeof val !== "number" || !isFinite(val) || val <= 0) return "";
+    var fixed = val >= 0.01 ? val.toFixed(3) : val.toFixed(4);
+    return "$" + fixed.replace(/0+$/, "").replace(/\\.$/, "");
+  }
+
+  function buildUsageElement(usage) {
+    if (!usage || typeof usage !== "object") return null;
+    var orMeta = usage.openrouter_metadata && typeof usage.openrouter_metadata === "object"
+      ? usage.openrouter_metadata
+      : {};
+    var pills = [];
+    function addPill(text, cls, title) {
+      var span = document.createElement("span");
+      span.className = "usage-pill" + (cls ? " " + cls : "");
+      span.textContent = text;
+      if (title) span.title = title;
+      pills.push(span);
+    }
+
+    var provider = typeof usage.provider === "string" ? usage.provider : "";
+    if (!provider && Array.isArray(orMeta.endpoints)) {
+      for (var i = 0; i < orMeta.endpoints.length; i++) {
+        var ep = orMeta.endpoints[i];
+        if (ep && ep.selected && (ep.provider || ep.provider_name)) {
+          provider = String(ep.provider || ep.provider_name);
+          break;
+        }
+      }
+    }
+    var attempt = typeof usage.attempt === "number" ? usage.attempt
+      : (typeof orMeta.attempt === "number" ? orMeta.attempt : 1);
+    var strategy = typeof usage.strategy === "string" ? usage.strategy
+      : (typeof orMeta.strategy === "string" ? orMeta.strategy : "");
+    var region = typeof usage.region === "string" ? usage.region
+      : (typeof orMeta.region === "string" ? orMeta.region : "");
+    if (provider) {
+      var attemptSuffix = attempt > 1 ? " · attempt " + attempt : "";
+      var tooltipParts = ["Provider: " + provider];
+      if (strategy) tooltipParts.push("strategy: " + strategy);
+      if (region) tooltipParts.push("region: " + region);
+      if (attempt > 1) tooltipParts.push("attempt: " + attempt);
+      addPill("via " + provider + attemptSuffix, "provider", tooltipParts.join(" · "));
+    } else if (attempt > 1) {
+      addPill("attempt " + attempt, "provider", "");
+    }
+
+    var genMs = typeof usage.generation_time === "number" ? usage.generation_time
+      : (typeof orMeta.generation_time === "number" ? orMeta.generation_time : null);
+    var elapsedMs = typeof usage.elapsed_ms === "number" ? usage.elapsed_ms : null;
+    var displayMs = genMs !== null && genMs > 0 ? genMs : elapsedMs;
+    if (typeof displayMs === "number" && displayMs >= 0) {
+      var secText = displayMs >= 1000
+        ? (displayMs / 1000).toFixed(1) + "s"
+        : Math.round(displayMs) + "ms";
+      var genLabel = genMs !== null ? "Generation: " + Math.round(genMs) + "ms" : "";
+      var timingTitle = genMs !== null && elapsedMs !== null
+        ? genLabel + " · Wall-clock: " + Math.round(elapsedMs) + "ms"
+        : (genLabel || "Latency: " + Math.round(displayMs) + "ms");
+      addPill("⏱ " + secText, "", timingTitle);
+    }
+
+    var totalTok = typeof usage.total_tokens === "number" ? usage.total_tokens : null;
+    var promptTok = typeof usage.prompt_tokens === "number" ? usage.prompt_tokens : null;
+    var compTok = typeof usage.completion_tokens === "number" ? usage.completion_tokens : null;
+    var compRaw = usage.completion_tokens_details;
+    var compDetails = compRaw && typeof compRaw === "object" ? compRaw : {};
+    var promptRaw = usage.prompt_tokens_details;
+    var promptDetails = promptRaw && typeof promptRaw === "object" ? promptRaw : {};
+    var rVal = compDetails.reasoning_tokens;
+    var reasoningTok = typeof rVal === "number" && rVal > 0 ? rVal : 0;
+    var cVal = promptDetails.cached_tokens;
+    var cachedTok = typeof cVal === "number" && cVal > 0 ? cVal : 0;
+
+    if (totalTok !== null && totalTok > 0) {
+      var details = [];
+      if (reasoningTok > 0 && compTok !== null) {
+        var visibleTok = Math.max(compTok - reasoningTok, 0);
+        details.push(visibleTok + " ans + " + reasoningTok + " reasoning");
+      } else if (reasoningTok > 0) {
+        details.push(reasoningTok + " reasoning");
+      }
+      if (cachedTok > 0) details.push(cachedTok + " cached");
+      var label = details.length > 0
+        ? totalTok + " tok (" + details.join(" · ") + ")"
+        : totalTok + " tok";
+      var tokTitle = [];
+      if (promptTok !== null) tokTitle.push("Prompt: " + promptTok);
+      if (compTok !== null) tokTitle.push("Completion: " + compTok);
+      if (reasoningTok > 0) tokTitle.push("Reasoning: " + reasoningTok);
+      if (cachedTok > 0) tokTitle.push("Cached read: " + cachedTok);
+      addPill(label, "", tokTitle.join(" · "));
+    }
+
+    var toolUse = usage.server_tool_use && typeof usage.server_tool_use === "object"
+      ? usage.server_tool_use
+      : {};
+    var sReqs = toolUse.web_search_requests;
+    var searchReqs = typeof sReqs === "number" && sReqs > 0 ? sReqs : 0;
+    var costDetails = usage.cost_details && typeof usage.cost_details === "object"
+      ? usage.cost_details
+      : {};
+    var sCost = costDetails.server_tool_cost;
+    var toolCost = typeof sCost === "number" && sCost > 0 ? sCost : 0;
+    var totalCost = typeof usage.cost === "number" && usage.cost > 0 ? usage.cost : 0;
+
+    if (searchReqs > 0) {
+      var searchLabel = searchReqs + " search" + (searchReqs === 1 ? "" : "es")
+        + (toolCost > 0 ? " (" + formatUsd(toolCost) + ")" : "");
+      addPill("🌐 " + searchLabel, "search", "OpenRouter server-side web search");
+    }
+    if (totalCost > 0) {
+      var costSuffix = " (includes " + formatUsd(toolCost) + " web search)";
+      var costTitle = toolCost > 0
+        ? "Total cost: " + formatUsd(totalCost) + costSuffix
+        : "Cost: " + formatUsd(totalCost);
+      addPill(formatUsd(totalCost), "cost", costTitle);
+    } else if (toolCost > 0 && searchReqs === 0) {
+      addPill(formatUsd(toolCost), "cost", "Web search cost");
+    }
+
+    var rawGenId = usage.generation_id;
+    var genId = typeof rawGenId === "string" && rawGenId ? rawGenId : "";
+    var nativeStop = typeof usage.native_finish_reason === "string" && usage.native_finish_reason
+      ? usage.native_finish_reason
+      : "";
+    if (genId) {
+      var shortGen = genId.length > 16 ? genId.slice(0, 14) + "…" : genId;
+      var genTitle = nativeStop
+        ? "Generation ID: " + genId + " · stop: " + nativeStop
+        : "Generation ID: " + genId;
+      addPill(shortGen, "", genTitle);
+    }
+
+    if (pills.length === 0) return null;
+    var row = document.createElement("div");
+    row.className = "usage-pills";
+    for (var j = 0; j < pills.length; j++) row.appendChild(pills[j]);
+    return row;
+  }
+
+  function buildCitationsElement(usage) {
+    var citations = extractCitations(usage);
+    if (citations.length === 0) return null;
+    var detailsEl = document.createElement("details");
+    detailsEl.className = "citations-strip";
+    var summaryEl = document.createElement("summary");
+    var plural = citations.length === 1 ? "" : "s";
+    summaryEl.textContent = "🔗 " + citations.length + " web citation" + plural;
+    detailsEl.appendChild(summaryEl);
+    var listEl = document.createElement("ol");
+    listEl.className = "citations-list";
+    for (var i = 0; i < citations.length; i++) {
+      var c = citations[i];
+      var li = document.createElement("li");
+      var link = document.createElement("a");
+      link.href = c.url;
+      link.target = "_blank";
+      link.rel = "noopener noreferrer";
+      link.textContent = c.title;
+      li.appendChild(link);
+      if (c.content) {
+        var snippet = document.createElement("span");
+        var clipped = c.content.length > 140 ? c.content.slice(0, 140) + "…" : c.content;
+        snippet.textContent = " — " + clipped;
+        li.appendChild(snippet);
+      }
+      listEl.appendChild(li);
+    }
+    detailsEl.appendChild(listEl);
+    return detailsEl;
+  }
+
+  var synthMetaHost = document.getElementById("report-synthesis-meta");
+  if (synthMetaHost) {
+    var synthPills = buildUsageElement(data.synthesis_usage);
+    if (synthPills) synthMetaHost.appendChild(synthPills);
+  }
+  var synthCitationsHost = document.getElementById("report-synthesis-citations");
+  if (synthCitationsHost) {
+    var synthCites = buildCitationsElement(data.synthesis_usage);
+    if (synthCites) synthCitationsHost.appendChild(synthCites);
+  }
+
   var answers = data.answers || [];
   var countElement = document.getElementById("report-answer-count");
   if (countElement) countElement.textContent = " (" + answers.length + ")";
@@ -325,8 +609,14 @@ _BOOT_SCRIPT = """
 
     var heading = document.createElement("h3");
     var label = answer.model || answer.requested_model || "unknown model";
+    if (answer.requested_model && answer.model && answer.requested_model !== answer.model) {
+      label += " (via " + answer.requested_model + ")";
+    }
     heading.textContent = (index + 1) + ". " + label;
     section.appendChild(heading);
+
+    var memberPills = buildUsageElement(answer.usage);
+    if (memberPills) section.appendChild(memberPills);
 
     if (answer.error) {
       var failure = document.createElement("p");
@@ -338,6 +628,8 @@ _BOOT_SCRIPT = """
       body.className = "markdown-body";
       renderInto(body, answer.content);
       section.appendChild(body);
+      var memberCites = buildCitationsElement(answer.usage);
+      if (memberCites) section.appendChild(memberCites);
     }
     host.appendChild(section);
   });
@@ -462,6 +754,7 @@ def build_report_html(run: Mapping[str, Any]) -> str:
         {
             "prompt": prompt,
             "synthesis": synthesis,
+            "synthesis_usage": run.get("synthesis_usage") or {},
             "judge": judge,
             "created": created,
             "answers": [
@@ -470,6 +763,7 @@ def build_report_html(run: Mapping[str, Any]) -> str:
                     "model": answer.get("model"),
                     "content": answer.get("content"),
                     "error": answer.get("error"),
+                    "usage": answer.get("usage") or {},
                 }
                 for answer in answers
             ],
@@ -512,7 +806,9 @@ def build_report_html(run: Mapping[str, Any]) -> str:
         "  </section>\n"
         "  <section>\n"
         "    <h2>Council synthesis</h2>\n"
+        '    <div id="report-synthesis-meta"></div>\n'
         '    <div class="markdown-body" id="report-synthesis"></div>\n'
+        '    <div id="report-synthesis-citations"></div>\n'
         "  </section>\n"
         "  <section>\n"
         '    <h2>Member answers<span id="report-answer-count"></span></h2>\n'
