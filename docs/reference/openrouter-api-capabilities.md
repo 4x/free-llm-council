@@ -6,7 +6,7 @@ Audit of what `llm-council` uses from the OpenRouter API versus what the platfor
 
 | Surface | Where | Notes |
 | --- | --- | --- |
-| `POST /chat/completions` | [client.py](../../src/llm_council/client.py) `complete()` | `model`, `messages`, `stream: false`, optional `max_tokens`, `provider.max_price` for free-only enforcement, `X-OpenRouter-Metadata: enabled` request header, and optional `tools: [{"type": "openrouter:web_search", "parameters": {"max_uses": 3}}]` for server-side web search |
+| `POST /chat/completions` | [client.py](../../src/llm_council/client.py) `complete()` | `model`, `messages`, `stream: false`, optional `max_tokens`, `provider.max_price` for free-only enforcement, `X-OpenRouter-Metadata: enabled` request header, optional `tools: [{"type": "openrouter:web_search", "parameters": {"max_uses": 3}}]` for server-side web search, and optional `reasoning: {"effort": "<level>"}` when `THINKING_LEVEL` is set |
 | `GET /models` | [client.py](../../src/llm_council/client.py) `list_models()` | Filters: `input_modalities=text`, `output_modalities=text`, `max_price=0`, `max_output_price=0`, `limit`, `offset`; plus `sort=intelligence-high-to-low` and `min_intelligence_index=0` for the `most-intelligent` judge |
 | Response `usage` + inline metadata | `complete()` → `ModelAnswer.usage` | Persisted to DuckDB (`responses.usage`); includes `generation_id` (`id` / `X-Generation-Id`), `elapsed_ms`, `finish_reason`, `native_finish_reason`, `service_tier`, `provider`, `strategy`, `region`, `attempt`, `generation_time`, `ttft`, `tps`, `openrouter_metadata`, `completion_tokens_details.reasoning_tokens`, `prompt_tokens_details.cached_tokens`, `cost`, `cost_details.server_tool_cost`, `server_tool_use.web_search_requests`, and deduplicated web `citations` (`message.annotations` / Gemini `grounding_metadata`). Rendered as pills and citation strips in the Web UI and HTML reports |
 | `GET /generation?id=` | [client.py](../../src/llm_council/client.py) `get_generation()` via [reconcile.py](../../src/llm_council/reconcile.py) | On demand (`--reconcile-generations`), backfills `native_tokens_prompt`, `native_tokens_completion`, `upstream_inference_cost`, `cache_discount`, and the full payload into `usage["generation"]` for stored answers |
@@ -43,6 +43,8 @@ Reference: [structured outputs](https://openrouter.ai/docs/guides/features/struc
 ### 4. Reasoning-model controls
 
 Reasoning tokens are billed as output tokens and, on most providers, count against the request's `max_tokens`. That makes them a plausible contributor to our `exhausted MAX_TOKENS` path in `complete()`.
+
+**Adopted:** `THINKING_LEVEL` / `--thinking-level` (Python `thinking_level=`) sends `reasoning: {"effort": "minimal" | "low" | "medium" | "high" | "max"}` on every OpenRouter request and the matching `thinking_config.thinking_level` on Gemini requests, where `max` is sent as `high`. Leaving it unset omits the parameter, preserving provider defaults. The sections below record the other controls that remain unused.
 
 #### Suppressing returned reasoning is not the same as disabling reasoning
 
@@ -157,6 +159,6 @@ Our retry logic distinguishes only 402 in-flight budget from other 402s. OpenRou
 
 1. Attribution headers — trivial, immediate.
 2. `response_format` json_schema — deletes the fragile `_parse_improved_prompts` heuristics.
-3. `reasoning` budget controls (`effort` / `max_tokens` / `enabled: false`) — the actual fix for reasoning consuming `MAX_TOKENS`; the truncation message now reports the reasoning/visible token split, so a reasoning-starved run is identified without extra instrumentation. Do **not** reach for `exclude`.
+3. `reasoning` budget controls — `effort` is adopted as `THINKING_LEVEL`; `max_tokens` and `enabled: false` remain unused because the level is portable to Gemini, while a token budget is not. The truncation message reports the reasoning/visible token split, so a reasoning-starved run is identified without extra instrumentation. Do **not** reach for `exclude`.
 4. `GET /key` — concrete 402 diagnosis and free-tier visibility.
 5. `models` fallback array + provider preferences — simplifies the judge loop.

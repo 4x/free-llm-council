@@ -15,7 +15,7 @@ from threading import Event
 from typing import Any
 from urllib.parse import unquote, urlparse
 
-from .config import Settings
+from .config import Settings, ThinkingLevel
 from .council import improve_prompt, query_result
 from .errors import CouncilError
 from .judges import STRATEGIES
@@ -1304,6 +1304,23 @@ _UI_HTML = r"""<!doctype html>
             />
           </div>
 
+          <div class="judge-group">
+            <label for="thinking-level-select">Thinking level:</label>
+            <select
+              id="thinking-level-select"
+              class="judge-select"
+              aria-label="Thinking level"
+              title="Reasoning effort for council members and the judge: OpenRouter reasoning.effort, Gemini thinking_level. Gemini has no 'max' and uses 'high' instead."
+            >
+              <option value="">Default (from server)</option>
+              <option value="minimal">minimal (least reasoning)</option>
+              <option value="low">low</option>
+              <option value="medium">medium</option>
+              <option value="high">high</option>
+              <option value="max">max (strongest)</option>
+            </select>
+          </div>
+
           <label
             id="search-web-toggle"
             class="search-web-toggle"
@@ -1402,6 +1419,7 @@ _UI_HTML = r"""<!doctype html>
   const judgeSelect = document.getElementById("judge-select");
   const searchWebToggle = document.getElementById("search-web-toggle");
   const searchWebCheckbox = document.getElementById("search-web-checkbox");
+  const thinkingLevelSelect = document.getElementById("thinking-level-select");
   const judgeCustomInput = document.getElementById("judge-custom-input");
   const clearBtn = document.getElementById("clear-btn");
   const stopBtn = document.getElementById("stop-btn");
@@ -2220,6 +2238,7 @@ _UI_HTML = r"""<!doctype html>
       file_content: state.attachedFile ? state.attachedFile.content : null,
       judge: judgeValue,
       search_web: searchWebCheckbox.checked,
+      thinking_level: thinkingLevelSelect.value || null,
       previous_synthesis: null,
       prior_turns: null,
     };
@@ -2417,6 +2436,9 @@ _UI_HTML = r"""<!doctype html>
         const cfg = await cfgResp.json();
         if (typeof cfg.search_web === "boolean") {
           searchWebCheckbox.checked = cfg.search_web;
+        }
+        if (typeof cfg.thinking_level === "string") {
+          thinkingLevelSelect.value = cfg.thinking_level;
         }
         if (typeof cfg.reconcile_limit === "number" && cfg.reconcile_limit > 0) {
           state.reconcileLimit = cfg.reconcile_limit;
@@ -2666,6 +2688,12 @@ def create_web_server(
                         "save_initial_answers": base_settings.save_initial_answers.value,
                         "save_synthesis": base_settings.save_synthesis.value,
                         "search_web": base_settings.search_web,
+                        "thinking_level": (
+                            base_settings.thinking_level.value
+                            if base_settings.thinking_level is not None
+                            else None
+                        ),
+                        "thinking_levels": [level.value for level in ThinkingLevel],
                         "reconcile_limit": WEB_RECONCILE_LIMIT,
                         "time_zone": os.environ.get("TIME_ZONE"),
                     }
@@ -2754,6 +2782,11 @@ def create_web_server(
                     search_web = body.get("search_web")
                     if search_web is not None and not isinstance(search_web, bool):
                         raise CouncilError("search_web must be a JSON boolean.")
+                    thinking_level = body.get("thinking_level")
+                    if thinking_level is not None and not isinstance(thinking_level, str):
+                        raise CouncilError("thinking_level must be a JSON string or null.")
+                    if isinstance(thinking_level, str):
+                        ThinkingLevel.parse(thinking_level)  # Validate before streaming starts.
                     previous_synthesis = body.get("previous_synthesis")
                     raw_prior_turns = body.get("prior_turns")
                     prior_turns: list[tuple[str, str]] | None = None
@@ -2790,6 +2823,7 @@ def create_web_server(
                         settings=base_settings,
                         judge=str(judge),
                         search_web=search_web,
+                        thinking_level=thinking_level,
                         literal_prompt=True,
                         previous_synthesis=(
                             str(previous_synthesis)

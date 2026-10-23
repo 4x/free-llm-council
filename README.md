@@ -87,6 +87,7 @@ uv run llm-council -q "Compare Bayesian and frequentist inference" --judge large
   --save-prompt both --save-initial-answers both --save-synthesis both
 uv run llm-council -q "Explain entropy" --no-save
 uv run llm-council -q "What shipped in the latest Rust release?" --search-web
+uv run llm-council -q "Prove that sqrt(2) is irrational" --thinking-level high
 uv run llm-council --followup "provide more details about that last security caveat" --copy
 uv run llm-council --export-markdown
 uv run llm-council --export-html
@@ -105,7 +106,7 @@ the local HTML web interface.
 ### Web UI (`--web` / `--serve`)
 
 `uv run llm-council --web` (or `--web --open-browser`, or the root `launch-web.cmd` / `launch-web.ps1` launchers) starts a local HTTP/SSE workspace on `http://127.0.0.1:8765` with:
-- A prominent prompt composer with `<New>`, `<Followup>`, `<Clear>` (clears the prompt textbox), and red `<Stop>` (disabled/grayed out unless an active LLM retrieval is in progress) buttons with hover tooltips, a paperclip file attachment button (`📎 Attach file`), a Judge Criterion selector (all built-in strategies plus custom model slug), a `🌐 Web search` checkbox that enables server-side search per run (defaults to the server's `SEARCH_WEB` setting), and a one-click `✨ Improve Prompt` drawer.
+- A prominent prompt composer with `<New>`, `<Followup>`, `<Clear>` (clears the prompt textbox), and red `<Stop>` (disabled/grayed out unless an active LLM retrieval is in progress) buttons with hover tooltips, a paperclip file attachment button (`📎 Attach file`), a Judge Criterion selector (all built-in strategies plus custom model slug), a `Thinking level` dropdown (`minimal`, `low`, `medium`, `high`, `max`; defaults to the server's `THINKING_LEVEL` setting), a `🌐 Web search` checkbox that enables server-side search per run (defaults to the server's `SEARCH_WEB` setting), and a one-click `✨ Improve Prompt` drawer.
 - Real-time Server-Sent Events (SSE) streaming of council member answers as each model finishes, followed by the synthesized response and pagination pills (`Prompt`, `Synthesis`, numbered member tabs, `Prev`/`Next`, and `All Answers`).
 - KaTeX typesetting of LaTeX in answers and syntheses. Inline `$...$` and `\(...\)` render inline; `$$...$$` and `\[...\]` render as centered display equations that scroll horizontally when they are wider than the card. Math inside fenced or inline code stays literal, as do currency amounts like `$5` and escaped `\$`.
 - Left-hand conversation history panel separating **Current Session** runs from **Saved in DuckDB** runs (rendered less prominently). Selecting any historical run populates its prompt and stored answers/synthesis (subject to availability), and clicking `<Followup>` while a conversation is selected follows up directly on that conversation.
@@ -230,6 +231,7 @@ against the current working directory. `--env-file` / `env_file=` selects anothe
 | `JUDGE` | `judge` / `--judge` | `random` |
 | `JUDGE_SCOPE` | `judge_scope` / `--judge-scope` | `free` |
 | `SEARCH_WEB` | `search_web` / `--search-web` | `false`; let members and the judge run server-side web search (paid per search, even on free models) |
+| `THINKING_LEVEL` | `thinking_level` / `--thinking-level` | unset (provider default); `minimal`, `low`, `medium`, `high`, or `max` reasoning effort for members, the judge, and `--improve` |
 | `JUDGE_PROMPT` | `judge_prompt` / `--judge-prompt` | unset (built-in backup) |
 | `FREE_ROUTER_MODEL` | `free_router_model` (Python only) | empty; required for `free-router` |
 | `AUTO_ROUTER_MODEL` | `auto_router_model` (Python only) | empty; required for `auto` |
@@ -245,6 +247,28 @@ against the current working directory. `--env-file` / `env_file=` selects anothe
 Save modes are case-insensitive: `NONE`, `NO`, `NEITHER` (all disable), `DUCKDB`,
 `MARKDOWN`, `BOTH`. Files and text prompts are saved to DuckDB by default; saving a
 file copies its **contents**, not just its filename.
+
+### Thinking level
+
+`THINKING_LEVEL` / `--thinking-level` / Python `thinking_level=` requests reasoning effort
+from every council member, the judge, and the `--improve` model. Accepted values are
+`minimal`, `low`, `medium`, `high`, and `max`; leave it unset to omit the parameter and
+keep each provider's default. The two APIs spell this differently, and `llm-council` sends
+the right form for each model:
+
+- **OpenRouter** receives `reasoning: {"effort": "<level>"}`. OpenRouter maps effort to the
+  selected provider's own control and steps unsupported values down to the nearest level the
+  model accepts. Models that cannot be quieted keep reasoning on.
+- **Gemini** receives `thinking_config.thinking_level`. Gemini accepts `minimal`, `low`,
+  `medium`, and `high` but has no `max`, so `max` is sent as `high`. `minimal` is not
+  supported by every Gemini 3 model (for example `gemini-3.8-flash`); the API then rejects
+  the request, and that member's error is reported like any other.
+
+Reasoning tokens are billed as output tokens and, on most providers, count against
+`MAX_TOKENS`, so a high level can leave room for reasoning and none for the answer. When a
+run truncates, the error says whether reasoning or visible output consumed the budget;
+lower the thinking level before raising `MAX_TOKENS` in that case. The web UI dropdown
+defaults to the configured level and can override it per run.
 
 ## Logging
 
@@ -434,8 +458,8 @@ original question plus **all successful answers in full**.
   Nothing is silently truncated. Huge councils may exceed the judge's context; use
   `largest-context`, a larger explicit judge, or shorter member output. Token-limit
   truncation is treated as a failure, and the error separates reasoning tokens from
-  visible output: reasoning-dominated truncation suggests capping reasoning rather
-  than raising `MAX_TOKENS`.
+  visible output: reasoning-dominated truncation suggests capping reasoning (lower
+  `--thinking-level` or omit it) rather than raising `MAX_TOKENS`.
 - Default request spacing targets fewer than 20 starts/minute; actual per-minute/daily
   free quotas depend on your key/account and other clients. A council consumes one
   request per free model, plus one judge request and retries.

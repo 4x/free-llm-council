@@ -1,6 +1,6 @@
 """A council of free OpenRouter models with configurable LLM synthesis."""
 
-from .config import SaveMode, Settings
+from .config import SaveMode, Settings, ThinkingLevel
 from .council import improve_prompt, query, query_result
 from .errors import ConfigurationError, CouncilError, OpenRouterError, StorageError
 from .models import CouncilResult, ModelAnswer
@@ -23,6 +23,7 @@ __all__ = [
     "serve_web",
     "Settings",
     "SaveMode",
+    "ThinkingLevel",
     "CouncilResult",
     "ModelAnswer",
     "CouncilError",

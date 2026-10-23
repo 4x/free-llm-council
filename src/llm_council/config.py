@@ -33,6 +33,39 @@ def _parse_bool(name: str, value: Any) -> bool:
     raise ValueError(f"{name} must be a boolean (true/false, yes/no, 1/0)")
 
 
+class ThinkingLevel(StrEnum):
+    """Reasoning effort requested from council members and the judge.
+
+    Values follow OpenRouter's `reasoning.effort`; Gemini accepts the same names
+    except `max`, which is sent as `high` (see `client._gemini_thinking_level`).
+    """
+
+    MINIMAL = "minimal"
+    LOW = "low"
+    MEDIUM = "medium"
+    HIGH = "high"
+    MAX = "max"
+
+    @classmethod
+    def parse(cls, value: str | ThinkingLevel | None) -> ThinkingLevel | None:
+        """Parse a level, treating blank/`default` as "use the provider default"."""
+        if isinstance(value, cls):
+            return value
+        if value is None:
+            return None
+        normalized = str(value).strip().lower()
+        if not normalized or normalized == "default":
+            return None
+        try:
+            return cls(normalized)
+        except ValueError as exc:
+            allowed = ", ".join(level.value for level in cls)
+            raise ConfigurationError(
+                f"Invalid thinking level {value!r}; use {allowed}, or leave it blank for "
+                "the provider default."
+            ) from exc
+
+
 class SaveMode(StrEnum):
     NONE = "none"
     DUCKDB = "duckdb"
@@ -82,6 +115,7 @@ class Settings:
 
     judge_scope: Literal["free", "all"] = "free"
     search_web: bool = False
+    thinking_level: ThinkingLevel | None = None
     max_concurrency: int = 3
     request_interval: float = 3.1
     timeout: float = 120.0
@@ -128,6 +162,7 @@ class Settings:
             "router_models": "ROUTER_MODELS",
             "judge_scope": "JUDGE_SCOPE",
             "search_web": "SEARCH_WEB",
+            "thinking_level": "THINKING_LEVEL",
             "max_concurrency": "MAX_CONCURRENCY",
             "request_interval": "REQUEST_INTERVAL",
             "timeout": "REQUEST_TIMEOUT",
@@ -186,6 +221,8 @@ class Settings:
                     converted[key] = float(converted[key])
             if "search_web" in converted:
                 converted["search_web"] = _parse_bool("search_web", converted["search_web"])
+            if "thinking_level" in converted:
+                converted["thinking_level"] = ThinkingLevel.parse(converted["thinking_level"])
             result = replace(self, **converted)
         except (ValueError, TypeError) as exc:
             raise ConfigurationError(f"Invalid configuration: {exc}") from exc

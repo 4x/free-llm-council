@@ -14,7 +14,7 @@ from pathlib import Path
 from rich.console import Console
 from rich.markdown import Markdown
 
-from .config import LOG_LEVELS
+from .config import LOG_LEVELS, ThinkingLevel
 from .council import _read_prompt, improve_prompt, query
 from .errors import ConfigurationError, CouncilError
 from .judges import STRATEGIES
@@ -124,6 +124,16 @@ def parser() -> argparse.ArgumentParser:
             "Let council members and the judge search the web server-side "
             "(OpenRouter web_search tool / Gemini Google Search); searches are "
             "billed on top of token costs, even for free models (overrides SEARCH_WEB)"
+        ),
+    )
+    result.add_argument(
+        "--thinking-level",
+        type=str.lower,
+        choices=tuple(level.value for level in ThinkingLevel),
+        help=(
+            "Reasoning effort for members and the judge (OpenRouter reasoning.effort / "
+            "Gemini thinking_level); omit for the provider default. Gemini has no 'max' "
+            "and uses 'high' instead"
         ),
     )
     result.add_argument("--duckdb-path", help="DuckDB file (default: council.duckdb)")

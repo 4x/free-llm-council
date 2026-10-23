@@ -13,7 +13,7 @@ from typing import TYPE_CHECKING, Any
 
 import httpx
 
-from .config import Settings
+from .config import Settings, ThinkingLevel
 from .errors import OpenRouterError
 from .models import ModelAnswer, model_exclusion_reason
 
@@ -37,6 +37,18 @@ GENERATION_ID_HEADER = "X-Generation-Id"
 # Post-hoc accounting for one generation: native tokenizer counts and upstream cost.
 GENERATION_PATH = "generation"
 MS_PER_SECOND = 1000
+
+
+def _gemini_thinking_level(level: ThinkingLevel) -> str:
+    """Map a thinking level onto Gemini's accepted values.
+
+    Gemini accepts `minimal`, `low`, `medium`, and `high`; it has no `max` level,
+    so the strongest OpenRouter effort is sent as Gemini's `high`.
+    """
+    if level is ThinkingLevel.MAX:
+        logger.debug("Gemini has no 'max' thinking level; sending 'high'")
+        return ThinkingLevel.HIGH.value
+    return level.value
 
 
 def _web_search_tool() -> dict[str, Any]:
@@ -677,6 +689,11 @@ class OpenRouterClient:
             config_kwargs["system_instruction"] = "\n\n".join(system_parts)
         if self.settings.max_tokens > 0:
             config_kwargs["max_output_tokens"] = self.settings.max_tokens
+        if self.settings.thinking_level is not None:
+            gemini_level = _gemini_thinking_level(self.settings.thinking_level)
+            config_kwargs["thinking_config"] = genai_types.ThinkingConfig(
+                thinking_level=genai_types.ThinkingLevel[gemini_level.upper()]
+            )
         if search_web:
             config_kwargs["tools"] = [genai_types.Tool(google_search=genai_types.GoogleSearch())]
         gen_config = genai_types.GenerateContentConfig(**config_kwargs) if config_kwargs else None
@@ -787,6 +804,10 @@ class OpenRouterClient:
         }
         if self.settings.max_tokens > 0:
             body["max_tokens"] = self.settings.max_tokens
+        if self.settings.thinking_level is not None:
+            # OpenRouter normalizes effort across providers and maps unsupported values
+            # down to the nearest level the selected model accepts.
+            body["reasoning"] = {"effort": self.settings.thinking_level.value}
         if free_only:
             # Protect against pricing changes between discovery and generation, including routers.
             body["provider"] = {"max_price": {"prompt": 0, "completion": 0}}
