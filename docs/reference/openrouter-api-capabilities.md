@@ -46,6 +46,14 @@ Reasoning tokens are billed as output tokens and, on most providers, count again
 
 **Adopted:** `THINKING_LEVEL` / `--thinking-level` (Python `thinking_level=`) sends `reasoning: {"effort": "minimal" | "low" | "medium" | "high" | "max"}` on every OpenRouter request and the matching `thinking_config.thinking_level` on Gemini requests, where `max` is sent as `high`. Leaving it unset omits the parameter, preserving provider defaults. The sections below record the other controls that remain unused.
 
+#### Reasoning does not add a separate charge on free endpoints
+
+Effort changes how many output tokens an endpoint generates, never the per-token rate. An audit of the live catalogue on 2026-10-23 found 19 free-capped text models (`GET /models?max_price=0&max_output_price=0`), each with a single endpoint (`GET /models/{id}/endpoints`) priced `prompt: "0"`, `completion: "0"`, `discount: 0` — no `internal_reasoning`, `request`, cache, image, or audio charges present at all. Reasoning is therefore $0 on every model the council can select.
+
+Three layers keep it that way: `is_free_model()` rejects a model whose `internal_reasoning` (or any other reported text charge) is nonzero, `provider.max_price: {prompt: 0, completion: 0}` blocks a provider that turns expensive between discovery and generation, and OpenRouter documents reasoning tokens as output usage, so the completion ceiling covers them. OpenRouter's docs give `max_price` only prompt and completion fields and say nothing about a separate reasoning ceiling, so the local `internal_reasoning` check is the guard for an endpoint that ever prices reasoning above completion. Effort also does not consume free-tier quota faster: `GET /key` reports `free_model_daily_requests`, counted in requests.
+
+Gemini is the exception. Google bills thought tokens at the model's output rate, includes them in `max_output_tokens`, and charges them even when the response is truncated or thinking is summarized. Models with free-tier access (`gemini-3.6-flash`, `gemini-3.8-flash`) bill nothing there, but `gemini-3.1-pro-preview` has no free tier. `_as_gemini_catalog_entry()` assigns every `GEMINI_MODELS` entry `pricing` zero unconditionally, so catalog-derived free detection never applies to those IDs.
+
 #### Suppressing returned reasoning is not the same as disabling reasoning
 
 `reasoning.exclude: true` does **not** turn reasoning off. The model still reasons; the tokens are still generated, still billed, and still count against `max_tokens`. The parameter only omits the `reasoning` field from the response. It saves no tokens, no cost, and no latency.
