@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import logging
 import math
+import random
 import threading
 import time
 from datetime import UTC, datetime
@@ -41,6 +42,15 @@ MS_PER_SECOND = 1000
 # server-side deadline; the client's REQUEST_TIMEOUT cannot extend that limit.
 GEMINI_DEADLINE_STATUS = 504
 GEMINI_DEADLINE_PROVIDER_STATUS = "DEADLINE_EXCEEDED"
+# Retries the provider did not schedule wait this long before the first attempt and
+# double per attempt. Upstream shared pools say "retry shortly" and clear within
+# seconds, so a near-immediate retry only refills the limit being waited on.
+RETRY_BASE_DELAY = 4.0
+# Keep at least this share of the computed wait; the rest is random. Independent
+# jitter stops members throttled at the same moment from retrying in lockstep.
+RETRY_JITTER_FLOOR_SHARE = 0.5
+# Bound the doublings so an extreme MAX_RETRIES cannot overflow the float wait.
+MAX_BACKOFF_DOUBLINGS = 32
 
 
 def _as_alternatives(options: list[str]) -> str:
@@ -340,10 +350,25 @@ class OpenRouterClient:
                 return None
 
     def _retry_delay(self, response: httpx.Response, attempt: int) -> float:
+        """Wait before a retry: the provider's `Retry-After`, else jittered backoff."""
         retry_after = self._retry_after(response)
         if retry_after is not None:
             return retry_after
-        return min(2.0**attempt, self.settings.max_retry_wait)
+        return self._fallback_delay(attempt)
+
+    def _fallback_delay(self, attempt: int) -> float:
+        """Back off exponentially with jitter when the provider scheduled no wait.
+
+        The delay is drawn from `[floor, ceiling]`, where `ceiling` doubles per attempt up
+        to `MAX_RETRY_WAIT`. Jitter matters because a shared upstream pool throttles
+        several council members at once: identical waits would make them retry together
+        and refill the limit they are all waiting on.
+        """
+        ceiling = min(
+            RETRY_BASE_DELAY * (2 ** min(attempt, MAX_BACKOFF_DOUBLINGS)),
+            self.settings.max_retry_wait,
+        )
+        return random.uniform(ceiling * RETRY_JITTER_FLOOR_SHARE, ceiling)
 
     def _deadline_hint(self, status: int | None, exc: Any) -> str:
         """Explain how to avoid a Gemini call that outlives the provider's deadline."""
@@ -757,7 +782,7 @@ class OpenRouterClient:
                     delay = (
                         self._retry_delay(raw_resp, attempt)
                         if isinstance(raw_resp, httpx.Response)
-                        else min(2.0**attempt, self.settings.max_retry_wait)
+                        else self._fallback_delay(attempt)
                     )
                     if delay <= self.settings.max_retry_wait:
                         logger.warning(
