@@ -37,6 +37,17 @@ GENERATION_ID_HEADER = "X-Generation-Id"
 # Post-hoc accounting for one generation: native tokenizer counts and upstream cost.
 GENERATION_PATH = "generation"
 MS_PER_SECOND = 1000
+# Gemini answers with 504 DEADLINE_EXCEEDED when a call outlives Google's own
+# server-side deadline; the client's REQUEST_TIMEOUT cannot extend that limit.
+GEMINI_DEADLINE_STATUS = 504
+GEMINI_DEADLINE_PROVIDER_STATUS = "DEADLINE_EXCEEDED"
+
+
+def _as_alternatives(options: list[str]) -> str:
+    """Join operator options as `a, b, or c` for readable guidance."""
+    if len(options) < 2:
+        return "".join(options)
+    return ", ".join(options[:-1]) + f", or {options[-1]}"
 
 
 def _gemini_thinking_level(level: ThinkingLevel) -> str:
@@ -334,6 +345,21 @@ class OpenRouterClient:
             return retry_after
         return min(2.0**attempt, self.settings.max_retry_wait)
 
+    def _deadline_hint(self, status: int | None, exc: Any) -> str:
+        """Explain how to avoid a Gemini call that outlives the provider's deadline."""
+        provider_status = getattr(exc, "status", None)
+        if status != GEMINI_DEADLINE_STATUS and provider_status != GEMINI_DEADLINE_PROVIDER_STATUS:
+            return ""
+        levers = ["lower THINKING_LEVEL", "lower MAX_TOKENS"]
+        if self.settings.search_web:
+            levers.append("disable SEARCH_WEB")
+        return (
+            " Gemini stopped the call at its own deadline, so this request asks for more"
+            " work than the provider will finish; repeating it unchanged fails the same"
+            f" way. REQUEST_TIMEOUT ({self.settings.timeout:g}s) bounds only this client."
+            f" Reduce the request: {_as_alternatives(levers)}, or shorten the prompt."
+        )
+
     def _redact(self, message: str) -> str:
         """Remove configured API keys from diagnostics, including JSON-escaped keys."""
         for raw_key in (self.settings.api_key, self.settings.gemini_api_key):
@@ -345,6 +371,11 @@ class OpenRouterClient:
     def _error_detail(self, error: Any, status: int | None = None) -> str:
         """Preserve provider messages and nested diagnostic metadata without truncation."""
         if isinstance(error, dict):
+            # Gemini's APIError details are the whole error envelope, with the diagnostic
+            # under "error"; read it instead of reporting a bare "Provider error".
+            nested = error.get("error")
+            if "message" not in error and isinstance(nested, dict):
+                error = nested
             message = str(error.get("message", "Provider error"))
             extra = {
                 key: value
@@ -742,7 +773,9 @@ class OpenRouterClient:
                             self._next_request = max(self._next_request, time.monotonic() + delay)
                         continue
                 prefix = f"Gemini error {status}" if status is not None else "Gemini error"
-                raise OpenRouterError(f"{prefix}: {message_text}", status) from exc
+                raise OpenRouterError(
+                    f"{prefix}: {message_text}{self._deadline_hint(status, exc)}", status
+                ) from exc
             except httpx.RequestError as exc:
                 raise OpenRouterError(
                     self._redact(f"Gemini transport failure ({type(exc).__name__}): {exc}")

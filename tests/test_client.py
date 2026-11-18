@@ -707,6 +707,57 @@ def test_gemini_max_tokens_truncation_raises_actionable_error(monkeypatch):
     assert "A partial answer was returned and discarded." in text
 
 
+def test_gemini_deadline_exceeded_reports_provider_message_and_recovery_hint(monkeypatch):
+    """A 504 keeps Google's own message and says which levers shrink the request."""
+    from types import SimpleNamespace
+
+    from google.genai import errors as genai_errors
+
+    attempts = []
+    monkeypatch.setattr("llm_council.client.time.sleep", lambda _delay: None)
+
+    class SlowModels:
+        def generate_content(self, **_kwargs):
+            attempts.append(1)
+            raise genai_errors.APIError(
+                504,
+                {
+                    "error": {
+                        "code": 504,
+                        "message": "Deadline expired before operation could complete.",
+                        "status": "DEADLINE_EXCEEDED",
+                    }
+                },
+                httpx.Response(504),
+            )
+
+    monkeypatch.setattr(
+        "google.genai.Client",
+        lambda **_kw: SimpleNamespace(models=SlowModels(), close=lambda: None),
+    )
+    settings = Settings().with_overrides(
+        api_key="or-key",
+        gemini_api_key="gem-secret-key",
+        gemini_models=("gemini-3.6-flash",),
+        request_interval=0,
+        max_retries=1,
+        search_web=True,
+    )
+    with OpenRouterClient(settings) as instance:
+        with pytest.raises(OpenRouterError) as caught:
+            instance.complete("gemini-3.6-flash", [{"role": "user", "content": "Hi"}])
+
+    text = str(caught.value)
+    assert caught.value.status_code == 504
+    # The envelope's nested message must be reported, not a bare "Provider error".
+    assert text.startswith("Gemini error 504: Deadline expired before operation could complete.")
+    assert "Provider error" not in text
+    assert "lower THINKING_LEVEL" in text
+    assert "lower MAX_TOKENS" in text
+    assert "disable SEARCH_WEB" in text
+    assert len(attempts) == 2
+
+
 def test_gemini_api_error_retries_429_and_redacts_key(monkeypatch):
     from types import SimpleNamespace
 

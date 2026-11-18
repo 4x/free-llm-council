@@ -8,6 +8,14 @@ Operational failure modes for `llm-council`. Logs go to stderr; synthesis goes t
 - `402` is retried only when `error.metadata.limit_source` is `openrouter_in_flight_budget`. Other `402` (insufficient credits) fails immediately — top up credits, don't raise retries.
 - What to check: run with `--log-level debug` to see `Retry-After`, `limit_source`, and redacted provider metadata. Lower `MAX_CONCURRENCY` or raise `REQUEST_INTERVAL` (default `3` / `3.1s` targets <20 starts/min). Free quotas are account-wide.
 
+## Gemini deadline exceeded: `504 DEADLINE_EXCEEDED`
+Symptom: a `GEMINI_MODELS` member or judge fails with `Gemini error 504: Deadline expired before operation could complete.; {"code": 504, "status": "DEADLINE_EXCEEDED"}`.
+
+- **Meaning.** Gemini accepted the request but the generation did not finish inside Google's own server-side deadline, so Google discarded it and returned no answer. Nothing is salvageable from the failed call.
+- **Not a client timeout.** `REQUEST_TIMEOUT` bounds how long this client waits and cannot extend Google's limit. A client-side overrun reads differently — `Gemini transport failure (ReadTimeout)` — and is deliberately not retried, because that request may already have been billed.
+- **Retries already happened.** `504` is retried with backoff up to `MAX_RETRIES`, so seeing this error means every attempt overran. Waiting for load to drop and re-running the identical council rarely helps.
+- **Recover by asking for less work**, in order of effect: lower `THINKING_LEVEL` (a high level is the usual cause), lower `MAX_TOKENS`, disable `SEARCH_WEB` (Google Search grounding makes calls longer), shorten the prompt, or drop the model from `GEMINI_MODELS`. Synthesis is the likeliest stage to hit the deadline because the judge receives every member answer in full: a smaller council or a `largest-context` judge reduces that prompt.
+
 ## Truncated answers: `exhausted MAX_TOKENS`
 
 Symptom: a member fails with `exhausted MAX_TOKENS: ...`. The suffix identifies what consumed the budget.
