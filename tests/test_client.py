@@ -216,6 +216,59 @@ def test_retry_after_over_cap_on_402_fails_without_early_retry(client):
     assert len(calls) == 1
 
 
+def test_fallback_retry_delay_jitters_exponential_backoff(client):
+    """Retries the provider did not schedule spread out instead of racing back."""
+    samples = [client._fallback_delay(0) for _ in range(50)]
+    assert all(2.0 <= value <= 4.0 for value in samples)
+    assert len(set(samples)) > 1
+
+
+def test_fallback_retry_delay_doubles_and_respects_max_retry_wait(client):
+    """Each attempt doubles the wait, capped by MAX_RETRY_WAIT without overflowing."""
+    client.settings = client.settings.with_overrides(max_retry_wait=6)
+    samples = [client._fallback_delay(1) for _ in range(50)]
+    assert all(3.0 <= value <= 6.0 for value in samples)
+    assert client._fallback_delay(5000) <= 6
+
+
+def test_429_without_retry_after_waits_jittered_backoff(client, monkeypatch):
+    """An upstream shared-pool 429 carries no Retry-After and is still backed off."""
+    calls = []
+    waits = []
+    clock = [0.0]
+    monkeypatch.setattr("llm_council.client.time.monotonic", lambda: clock[0])
+
+    def sleep(delay):
+        waits.append(delay)
+        clock[0] += delay
+
+    monkeypatch.setattr("llm_council.client.time.sleep", sleep)
+
+    def handler(request):
+        calls.append(request)
+        if len(calls) == 1:
+            return httpx.Response(
+                429,
+                json={
+                    "error": {
+                        "message": "Provider returned error",
+                        "metadata": {
+                            "provider_name": "Google AI Studio",
+                            "limit_source": "upstream_provider_shared_pool",
+                        },
+                    }
+                },
+            )
+        return httpx.Response(200, json=good())
+
+    transport(client, handler)
+    answer = client.complete("google/gemma-4-31b-it:free", [{"role": "user", "content": "Q"}])
+    assert answer.content == "Answer"
+    assert len(calls) == 2
+    assert len(waits) == 1
+    assert 2.0 <= waits[0] <= 4.0
+
+
 def test_request_start_pacing(client, monkeypatch):
     client.settings = client.settings.with_overrides(request_interval=3.1)
     now = [0.0]

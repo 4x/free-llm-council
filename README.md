@@ -453,7 +453,13 @@ any model that already errored). This avoids repeating a known-failing endpoint.
   spacing. Retries honor `Retry-After` on 429/503 responses and on 402 responses whose
   `error.metadata.limit_source` is `openrouter_in_flight_budget`; other 402 errors are
   not retried. Waits longer than `MAX_RETRY_WAIT` fail rather than sleeping indefinitely
-  or retrying too early. Other transient HTTP/API errors are retried, but ambiguous
+  or retrying too early. Retries the provider did not schedule back off from 4 seconds,
+  doubling per attempt up to `MAX_RETRY_WAIT`, with jitter that keeps at least half the
+  computed wait. The jitter matters for upstream shared-pool throttling (`429` with
+  `error.metadata.limit_source` of `upstream_provider_shared_pool`, e.g. a `:free` model
+  "temporarily rate-limited upstream"): every member hit at once would otherwise wait the
+  same interval and retry together, refilling the limit they are all waiting on.
+  Other transient HTTP/API errors are retried, but ambiguous
   network timeouts are not, to avoid duplicate paid work. `GEMINI_MODELS` follow the same
   policy, including `504 DEADLINE_EXCEEDED`, where Google discarded a call that outlived
   its server-side deadline; `REQUEST_TIMEOUT` cannot extend that limit, so recover by
