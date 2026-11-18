@@ -239,7 +239,7 @@ against the current working directory. `--env-file` / `env_file=` selects anothe
 | `EXCLUDED_MODELS` | `excluded_models` / `--excluded-models` | empty (no built-in model exclusions) |
 | `MAX_CONCURRENCY` | `max_concurrency` / `--max-concurrency` | `3` |
 | `REQUEST_INTERVAL` | `request_interval` / `--request-interval` | `3.1` seconds |
-| `REQUEST_TIMEOUT` | `timeout` / `--timeout` | `120` seconds/request |
+| `REQUEST_TIMEOUT` | `timeout` / `--timeout` | `120` seconds/request; does not extend Gemini's server-side deadline |
 | `MAX_RETRIES` | `max_retries` / `--max-retries` | `2` |
 | `MAX_RETRY_WAIT` | `max_retry_wait` / `--max-retry-wait` | `60` seconds |
 | `MAX_TOKENS` | `max_tokens` / `--max-tokens` | `2048` output tokens/call; a negative value omits the parameter and uses provider defaults |
@@ -454,7 +454,11 @@ any model that already errored). This avoids repeating a known-failing endpoint.
   `error.metadata.limit_source` is `openrouter_in_flight_budget`; other 402 errors are
   not retried. Waits longer than `MAX_RETRY_WAIT` fail rather than sleeping indefinitely
   or retrying too early. Other transient HTTP/API errors are retried, but ambiguous
-  network timeouts are not, to avoid duplicate paid work. See [OpenRouter error handling
+  network timeouts are not, to avoid duplicate paid work. `GEMINI_MODELS` follow the same
+  policy, including `504 DEADLINE_EXCEEDED`, where Google discarded a call that outlived
+  its server-side deadline; `REQUEST_TIMEOUT` cannot extend that limit, so recover by
+  lowering `THINKING_LEVEL` or `MAX_TOKENS`, disabling `SEARCH_WEB`, or shortening the
+  prompt. See [OpenRouter error handling
   and Retry-After guidance](https://openrouter.ai/docs/api_reference/errors-and-debugging)
   for retryable in-flight budget errors and non-retryable 402 insufficient-credit cases.
 - `MAX_TOKENS` values below zero omit the `max_tokens` field entirely so OpenRouter can
